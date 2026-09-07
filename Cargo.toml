@@ -1,0 +1,55 @@
+# Its own workspace root, so this repository builds on its own.
+[workspace]
+
+[package]
+name = "xmip-core-transport-http"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/IlleNilsson/xmip-core-transport-http"
+description = "HTTP transport: one request body is one Stream, with a reply channel; HTTPS behind the tls feature. A xmip-core-transport technology."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# A Technology depends on its parent Capability, never the reverse
+# (repository-model.md). The Transport trait, Arrived, Directions, the error
+# vocabulary and the line-oriented wire helpers live there. Standard library
+# otherwise, which is what lets this build on every target in
+# deployment-model.md without a cross-compilation story.
+transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+
+# Optional, and only for `tls`.
+# The ring feature, because tls.rs names that provider explicitly through
+# builder_with_provider. Without it rustls 0.23 compiles only its default
+# aws-lc-rs backend and rustls::crypto::ring does not exist.
+rustls = { version = "0.23", features = ["ring"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+# Reading certificate and key PEM for the server side. Only for `tls`.
+rustls-pemfile = { version = "2", optional = true }
+
+[dev-dependencies]
+# Generating a self-signed certificate for the tls handshake tests. Test-only —
+# it never ships in the crate.
+rcgen = "0.13"
+
+[features]
+default = []
+
+# HTTPS. Off by default because it is the only thing here that reaches outside
+# the standard library, and a forwarder on an edge device should not carry a TLS
+# stack it never opens.
+tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+too_many_lines = "warn"
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+unwrap_used = "warn"
+expect_used = "allow"
