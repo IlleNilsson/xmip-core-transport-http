@@ -12,9 +12,21 @@
 //! client.rs   writing the request, reading the answer
 //! server.rs   taking one request off a connection
 //! tls.rs      https, behind the `tls` feature
+//! message.rs  one request and its answer, both directions, for the
+//!             technologies that ride on HTTP (s3, azure-blob, gcs)
+//! endpoint.rs an `http://` or `https://` endpoint and a connection to it
+//! percent.rs  percent-encoding, RFC 3986's unreserved set
 //! ```
+//!
+//! The last three moved here from the object-store transports on
+//! 2026-09-09, where each had carried an identical copy: a technology that
+//! rides on HTTP shares HTTP's helpers through the http technology, never
+//! by copying a sibling's file (ADR-0044).
 
 pub mod client;
+pub mod endpoint;
+pub mod message;
+pub mod percent;
 pub mod server;
 pub mod target;
 
