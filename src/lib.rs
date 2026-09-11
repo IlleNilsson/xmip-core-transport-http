@@ -39,10 +39,12 @@ use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::{Result, classify};
+use transport::loopback::{FarEnd, Loopback};
 use transport::socket;
 
 use target::HttpTarget;
 
+#[derive(Clone)]
 pub struct HttpTransport {
     bind: String,
 }
@@ -120,6 +122,46 @@ impl Transport for HttpTransport {
         }
 
         client::exchange(tcp, &target, bytes)
+    }
+}
+
+impl HttpTransport {
+    /// Both ends on this machine: an ephemeral local port.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0")
+    }
+}
+
+/// A bound listener waiting for its one request.
+struct Listening {
+    transport: HttpTransport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        self.transport.accept_one(&self.listener)
+    }
+}
+
+impl Loopback for HttpTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.clone(),
+            listener,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        Self::new("127.0.0.1:0").send(&format!("http://{address}/pingpong"), payload)
     }
 }
 
