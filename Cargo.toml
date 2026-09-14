@@ -21,6 +21,15 @@ path = "src/lib.rs"
 # deployment-model.md without a cross-compilation story.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
 
+# The signatures the technologies riding on HTTP share through this crate
+# (ADR-0044, 2026-09-14): Signature Version 4 is SHA-256 and HMAC-SHA256,
+# a Shared Access Signature is HMAC-SHA256 written as base64. Pure Rust,
+# small, and carried unconditionally: unlike TLS they are a few hundred
+# lines, not a stack.
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+
 # Optional, and only for `tls`.
 # The ring feature, because tls.rs names that provider explicitly through
 # builder_with_provider. Without it rustls 0.23 compiles only its default
