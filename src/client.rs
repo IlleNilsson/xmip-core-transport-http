@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use transport::error::{Result, TransportError, classify, protocol_error};
 
+use super::message::retryable;
 use super::target::HttpTarget;
 
 /// Write a request and read back the status, over anything that reads and
@@ -67,21 +68,17 @@ fn read_status(reader: &mut impl BufRead) -> Result<u16> {
         .ok_or_else(|| protocol_error(format!("a status line Xmip cannot read: {}", status.trim())))
 }
 
-/// Whether the answer was a success, and whether a failure is worth repeating.
-///
-/// 5xx is the server's problem and may well pass on a second attempt. 4xx is
-/// ours and will not — with two documented exceptions, both of which explicitly
-/// mean *try again*.
+/// Whether the answer was a success, and whether a failure is worth repeating
+/// — the status rule [`retryable`] states, which every technology riding on
+/// HTTP judges by.
 fn judge(code: u16) -> Result<()> {
     if (200..300).contains(&code) {
         return Ok(());
     }
 
-    let retryable = code >= 500 || code == 408 || code == 429;
-
     Err(TransportError {
         message: format!("the server answered {code}"),
-        retryable,
+        retryable: retryable(code),
     })
 }
 

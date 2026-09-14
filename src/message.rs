@@ -3,7 +3,7 @@
 //!
 //! What every REST API over HTTP is underneath its signature — S3, Azure
 //! Blob, Cloud Storage — and what their far ends read. Xmip's side writes a
-//! request and reads the answer; the far end in [`crate::session`] reads a
+//! request and reads the answer; a technology's session reads a
 //! request and writes an answer. Both halves are here so the two cannot
 //! drift: a header written one way is read the same way.
 //!
@@ -13,7 +13,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 
-use transport::error::{Result, classify, protocol_error};
+use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::wire::{MAX_BODY, header, read_head};
 
 use crate::percent::{decode, encode};
@@ -129,6 +129,45 @@ impl Response {
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
+}
+
+/// Whether `status` says come back.
+///
+/// 5xx is the server's problem and may well pass on a second attempt. 4xx
+/// is ours and will not — with two documented exceptions, 408 Request
+/// Timeout and 429 Too Many Requests, which say in that range exactly what
+/// 5xx says.
+#[must_use]
+pub const fn retryable(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
+/// A 2xx answer as it is; anything else as a failure naming `service`, the
+/// status and the code `code` reads from the body, retryable where the
+/// status says come back or `retryable_code` says the code does.
+///
+/// Eight technologies each wrote the status rule beside their own body
+/// reader until 2026-09-14. The rule is HTTP's and lives here; the reader
+/// and the one extra code — `SlowDown`, `ServerBusy`, `Throttling` — stay
+/// the technology's, which is the dialect ADR-0044 leaves in place.
+///
+/// # Errors
+/// Where the status is not 2xx.
+pub fn judge(
+    service: &str,
+    response: Response,
+    code: impl FnOnce(&Response) -> String,
+    retryable_code: impl FnOnce(&str) -> bool,
+) -> Result<Response> {
+    if (200..300).contains(&response.status) {
+        return Ok(response);
+    }
+    let code = code(&response);
+    let retryable = retryable(response.status) || retryable_code(&code);
+    Err(TransportError {
+        message: format!("{service} answered {} {code}", response.status),
+        retryable,
+    })
 }
 
 /// Write `request` and read the answer.
@@ -265,7 +304,12 @@ fn find<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn body_length(head: &[String]) -> Result<usize> {
+/// How many bytes of body to expect, checked against [`MAX_BODY`] before
+/// anything is allocated.
+///
+/// No `Content-Length` means no body. That is not the same as a chunked
+/// request, which this does not implement and would be a different reader.
+pub(crate) fn body_length(head: &[String]) -> Result<usize> {
     let Some(value) = header(head, "content-length") else {
         return Ok(0);
     };
@@ -280,7 +324,7 @@ fn body_length(head: &[String]) -> Result<usize> {
     Ok(length)
 }
 
-fn read_body(reader: &mut impl Read, length: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_body(reader: &mut impl Read, length: usize) -> Result<Vec<u8>> {
     let mut bytes = vec![0u8; length];
     reader
         .read_exact(&mut bytes)
@@ -371,5 +415,58 @@ mod tests {
             MAX_BODY + 1
         );
         assert!(read_response(&mut over.as_bytes()).is_err());
+    }
+
+    fn head(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn no_content_length_means_no_body() {
+        assert_eq!(body_length(&head(&["POST / HTTP/1.1"])).expect("read"), 0);
+    }
+
+    #[test]
+    fn a_content_length_that_is_not_a_number_is_refused() {
+        let lines = head(&["POST / HTTP/1.1", "Content-Length: eight"]);
+        assert!(body_length(&lines).is_err());
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_before_it_is_read() {
+        // The point of checking the header rather than the read: a peer
+        // claiming four gigabytes must not get four gigabytes allocated.
+        let lines = head(&[
+            "POST / HTTP/1.1",
+            &format!("Content-Length: {}", MAX_BODY + 1),
+        ]);
+        assert!(body_length(&lines).is_err());
+    }
+
+    #[test]
+    fn a_success_is_any_two_hundred_and_the_two_client_codes_that_mean_try_again_retry() {
+        assert!(!retryable(200) && !retryable(299) && !retryable(404));
+        assert!(retryable(503) && retryable(408) && retryable(429));
+        let code = |answer: &Response| answer.text();
+        assert_eq!(
+            judge("S3", Response::new(204), code, |_| false)
+                .expect("ok")
+                .status,
+            204
+        );
+        let refused = judge("S3", Response::new(403).body(b"Denied"), code, |_| false)
+            .expect_err("forbidden");
+        assert_eq!(refused.message, "S3 answered 403 Denied");
+        assert!(!refused.retryable);
+        assert!(
+            judge("S3", Response::new(503), code, |_| false)
+                .expect_err("server")
+                .retryable
+        );
+        let slow = judge("S3", Response::new(400).body(b"SlowDown"), code, |c| {
+            c == "SlowDown"
+        })
+        .expect_err("slow down");
+        assert!(slow.retryable, "the technology's own code is honored");
     }
 }

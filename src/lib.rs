@@ -8,26 +8,46 @@
 //! that, and the two behave differently at the gate for that reason alone.
 //!
 //! ```text
-//! target.rs   where a send is going
-//! client.rs   writing the request, reading the answer
-//! server.rs   taking one request off a connection
-//! tls.rs      https, behind the `tls` feature
-//! message.rs  one request and its answer, both directions, for the
-//!             technologies that ride on HTTP (s3, azure-blob, gcs)
-//! endpoint.rs an `http://` or `https://` endpoint and a connection to it
-//! percent.rs  percent-encoding, RFC 3986's unreserved set
+//! target.rs     where a send is going
+//! client.rs     writing the request, reading the answer
+//! server.rs     taking one request off a connection, and serving one to
+//!               a technology's session
+//! tls.rs        https, behind the `tls` feature
+//! message.rs    one request and its answer, both directions, and the
+//!               judgement of an answer, for the technologies that ride
+//!               on HTTP
+//! endpoint.rs   an `http://` or `https://` endpoint and a connection to it
+//! percent.rs    percent-encoding, RFC 3986's unreserved set
+//! date.rs       the moment a header carries: RFC 1123, and x-amz-date
+//! signature.rs  a signature as text: hex, and the constant-time compare
+//! sigv4.rs      AWS Signature Version 4, for s3, aws-sqs, aws-sns, aws-kinesis
+//! query.rs      the AWS Query API, for aws-sqs and aws-sns
+//! sas.rs        Azure's Shared Access Signature, for azure-service-bus and
+//!               azure-event-hubs
+//! namespace.rs  what a servicebus.windows.net namespace answers when it
+//!               refuses, for the same two
 //! ```
 //!
-//! The last three moved here from the object-store transports on
-//! 2026-09-09, where each had carried an identical copy: a technology that
-//! rides on HTTP shares HTTP's helpers through the http technology, never
-//! by copying a sibling's file (ADR-0044).
+//! `message`, `endpoint` and `percent` moved here from the object-store
+//! transports on 2026-09-09, where each had carried an identical copy; the
+//! signers, the Query API, the header dates and the judgement followed on
+//! 2026-09-14, when aws-sqs was found importing s3, aws-sns and aws-kinesis
+//! importing aws-sqs, and azure-event-hubs importing azure-service-bus. A
+//! technology that rides on HTTP shares HTTP's helpers through the http
+//! technology, never by copying a sibling's file and never by importing a
+//! sibling (ADR-0044).
 
 pub mod client;
+pub mod date;
 pub mod endpoint;
 pub mod message;
+pub mod namespace;
 pub mod percent;
+pub mod query;
+pub mod sas;
 pub mod server;
+pub mod signature;
+pub mod sigv4;
 pub mod target;
 
 #[cfg(feature = "tls")]
