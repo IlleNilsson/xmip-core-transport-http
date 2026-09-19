@@ -181,7 +181,7 @@ impl Loopback for HttpTransport {
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
-        Self::new("127.0.0.1:0").send(&format!("http://{address}/pingpong"), payload)
+        Self::new("127.0.0.1:0").send(&format!("http://{address}/round-trip"), payload)
     }
 }
 
