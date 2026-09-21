@@ -19,16 +19,20 @@ use crate::message::{self, Request, Response, body_length, read_body};
 /// the work is done.
 const ACCEPTED: &[u8] = b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-/// Accept one request and answer it.
+/// Accept one request within `timeout`, with `timeout` on its reads, and
+/// answer it. `None` waits forever, which is what a listening Receive
+/// Location does.
 ///
 /// # Errors
 ///
-/// Where the connection failed, the request was malformed, or the body was
-/// larger than [`transport::wire::MAX_BODY`].
-pub fn accept_one(listener: &TcpListener) -> Result<Arrived> {
-    let (mut stream, peer) = listener
-        .accept()
-        .map_err(|e| classify("accepting a connection", &e))?;
+/// Where nothing connected within `timeout`, the connection failed, the
+/// request was malformed, or the body was larger than
+/// [`transport::wire::MAX_BODY`].
+pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
+    // The wait for the connection is bounded as well as the reads. This did
+    // a bare accept until 2026-09-21, so a far end whose near end never
+    // connected waited for good, and a hang has no verdict.
+    let (mut stream, peer) = socket::accept_tcp(listener, timeout)?;
 
     let mut reader = BufReader::new(
         stream

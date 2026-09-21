@@ -54,12 +54,13 @@ pub mod target;
 pub mod tls;
 
 use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
-use transport::error::{Result, classify};
-use transport::loopback::{FarEnd, Loopback};
+use transport::error::Result;
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
 use target::HttpTarget;
@@ -67,12 +68,24 @@ use target::HttpTarget;
 #[derive(Clone)]
 pub struct HttpTransport {
     bind: String,
+    timeout: Option<Duration>,
 }
 
 impl HttpTransport {
     #[must_use]
     pub fn new(bind: impl Into<String>) -> Self {
-        Self { bind: bind.into() }
+        Self {
+            bind: bind.into(),
+            timeout: None,
+        }
+    }
+
+    /// Give up on a connection that does not arrive, or stops sending, as
+    /// `TcpTransport` does.
+    #[must_use]
+    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     /// Bind and report the address actually assigned.
@@ -93,7 +106,7 @@ impl HttpTransport {
     ///
     /// As [`server::accept_one`].
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
-        server::accept_one(listener)
+        server::accept_one(listener, self.timeout)
     }
 
     /// Send over TLS, or say why not.
@@ -134,8 +147,10 @@ impl Transport for HttpTransport {
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let target = HttpTarget::parse(target)?;
 
-        let tcp = TcpStream::connect(target.address())
-            .map_err(|e| classify("connecting to the server", &e))?;
+        // The connect is bounded as well as the reads. This was a bare
+        // connect until 2026-09-21, which waits on the operating system's
+        // schedule, and longer still on a machine out of ephemeral ports.
+        let tcp = socket::connect_tcp(&target.address(), self.timeout)?;
 
         if target.secure {
             return Self::send_secure(&target, tcp, bytes);
@@ -146,10 +161,11 @@ impl Transport for HttpTransport {
 }
 
 impl HttpTransport {
-    /// Both ends on this machine: an ephemeral local port.
+    /// Both ends on this machine: an ephemeral local port, the loopback
+    /// timeout on the accept, the connect and the reads.
     #[must_use]
     pub fn loopback() -> Self {
-        Self::new("127.0.0.1:0")
+        Self::new("127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
     }
 }
 
@@ -181,7 +197,7 @@ impl Loopback for HttpTransport {
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
-        Self::new("127.0.0.1:0").send(&format!("http://{address}/round-trip"), payload)
+        Self::loopback().send(&format!("http://{address}/round-trip"), payload)
     }
 }
 
