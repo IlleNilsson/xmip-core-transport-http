@@ -12,8 +12,9 @@
 //! [`refusal`] says so before a request is formed rather than after the
 //! service answers `InvalidMessageContents`.
 
+use codec::xml::escape;
 use transport::error::{Result, TransportError};
-use transport::xml::{escape, first};
+use transport::xml::first;
 
 use crate::message::{self, Request, Response};
 use crate::percent::{decode, encode};
@@ -65,7 +66,12 @@ pub fn judge(service: &str, response: Response) -> Result<Response> {
     message::judge(
         service,
         response,
-        |answer| first(&answer.text(), "Code").unwrap_or_default(),
+        |answer| {
+            first(&answer.text(), "Code")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        },
         |code| {
             matches!(
                 code,
