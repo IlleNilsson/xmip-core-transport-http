@@ -20,6 +20,8 @@ path = "src/lib.rs"
 # otherwise, which is what lets this build on every target in
 # deployment-model.md without a cross-compilation story.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# XML character data, escaped as every reader in the estate unescapes it.
+codec = { package = "xmip-core-codec", git = "https://github.com/IlleNilsson/xmip-core-codec", branch = "main" }
 
 # The signatures the technologies riding on HTTP share through this crate
 # (ADR-0044, 2026-09-14): Signature Version 4 is SHA-256 and HMAC-SHA256,

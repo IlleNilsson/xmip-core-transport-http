@@ -9,8 +9,9 @@
 //! until 2026-09-14, and what two technologies both read over HTTP is
 //! shared through the http technology (ADR-0044).
 
+use codec::xml::escape;
 use transport::error::Result;
-use transport::xml::{escape, first};
+use transport::xml::first;
 
 use crate::message::{self, Response};
 
@@ -49,7 +50,12 @@ pub fn judge(service: &str, response: Response) -> Result<Response> {
     message::judge(
         service,
         response,
-        |answer| first(&answer.text(), "Detail").unwrap_or_default(),
+        |answer| {
+            first(&answer.text(), "Detail")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        },
         |detail| detail.starts_with("50002"),
     )
 }
