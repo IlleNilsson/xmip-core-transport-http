@@ -50,9 +50,6 @@ pub mod signature;
 pub mod sigv4;
 pub mod target;
 
-#[cfg(feature = "tls")]
-pub mod tls;
-
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
