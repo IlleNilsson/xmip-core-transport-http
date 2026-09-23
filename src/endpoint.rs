@@ -46,7 +46,7 @@ pub fn connect(endpoint: &str, timeout: Option<Duration>) -> Result<Box<dyn Conn
 
 #[cfg(feature = "tls")]
 fn secure(host: &str, tcp: TcpStream) -> Result<Box<dyn Connection>> {
-    Ok(Box::new(crate::tls::client(host, tcp)?))
+    Ok(Box::new(tls::client(host, tcp)?))
 }
 
 #[cfg(not(feature = "tls"))]

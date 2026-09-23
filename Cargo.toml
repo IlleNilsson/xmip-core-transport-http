@@ -32,19 +32,12 @@ sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 
-# Optional, and only for `tls`.
-# The ring feature, because tls.rs names that provider explicitly through
-# builder_with_provider. Without it rustls 0.23 compiles only its default
-# aws-lc-rs backend and rustls::crypto::ring does not exist.
-rustls = { version = "0.23", features = ["ring"], optional = true }
-rustls-native-certs = { version = "0.8", optional = true }
-# Reading certificate and key PEM for the server side. Only for `tls`.
-rustls-pemfile = { version = "2", optional = true }
+# Optional, and only for `tls`: the estate's TLS, hybrid key exchange and
+# all, which this crate carried until 2026-09-23 where no other transport
+# could reach it.
+tls = { package = "xmip-core-tls", git = "https://github.com/IlleNilsson/xmip-core-tls", branch = "main", optional = true }
 
 [dev-dependencies]
-# Generating a self-signed certificate for the tls handshake tests. Test-only —
-# it never ships in the crate.
-rcgen = "0.13"
 
 [features]
 default = []
@@ -52,7 +45,7 @@ default = []
 # HTTPS. Off by default because it is the only thing here that reaches outside
 # the standard library, and a forwarder on an edge device should not carry a TLS
 # stack it never opens.
-tls = ["dep:rustls", "dep:rustls-native-certs", "dep:rustls-pemfile"]
+tls = ["dep:tls", "transport/tls"]
 
 [lints.rust]
 unsafe_code = "forbid"
