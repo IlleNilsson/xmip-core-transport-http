@@ -82,6 +82,9 @@ mod tests {
     }
 
     #[test]
+    // The number is an epoch second count, and only reads as a moment in
+    // seconds; from_hours would hide which moment it is.
+    #[allow(clippy::duration_suboptimal_units)]
     fn the_date_is_written_as_amazon_writes_it() {
         let at = UNIX_EPOCH + Duration::from_secs(1_369_353_600);
         assert_eq!(amz_date(at), "20130524T000000Z");
