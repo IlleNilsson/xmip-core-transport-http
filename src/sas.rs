@@ -169,8 +169,7 @@ pub fn parse(authorization: &str) -> Result<Token> {
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |since| since.as_secs())
 }
 
 #[cfg(test)]
