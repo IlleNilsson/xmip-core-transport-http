@@ -9,6 +9,17 @@ Lifted out of the capability crate on 2026-09-07, where it had lived as
 the trait, the error vocabulary and the shared wire helpers; nothing in it names
 a protocol.
 
+This crate holds HTTP and nothing else: the request and its answer, the
+endpoint, percent-encoding, RFC 1123's date and the judgement of a status,
+which the technologies riding on HTTP share (ADR-0044). What a vendor speaks
+over it is the vendor's: Signature Version 4, the AWS Query API and
+`x-amz-date` are in
+[xmip-core-transport-aws](https://github.com/IlleNilsson/xmip-core-transport-aws),
+and Azure's Shared Access Signature and a Service Bus namespace's answers in
+[xmip-core-transport-azure](https://github.com/IlleNilsson/xmip-core-transport-azure).
+They lived here from 2026-09-14 until the owner's ruling of 2026-09-22 moved
+them, on 2026-09-24.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

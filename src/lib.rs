@@ -18,36 +18,27 @@
 //!               on HTTP
 //! endpoint.rs   an `http://` or `https://` endpoint and a connection to it
 //! percent.rs    percent-encoding, RFC 3986's unreserved set
-//! date.rs       the moment a header carries: RFC 1123, and x-amz-date
-//! signature.rs  a signature as text: hex, and the constant-time compare
-//! sigv4.rs      AWS Signature Version 4, for s3, aws-sqs, aws-sns, aws-kinesis
-//! query.rs      the AWS Query API, for aws-sqs and aws-sns
-//! sas.rs        Azure's Shared Access Signature, for azure-service-bus and
-//!               azure-event-hubs
-//! namespace.rs  what a servicebus.windows.net namespace answers when it
-//!               refuses, for the same two
+//! date.rs       the moment a header carries: RFC 1123
 //! ```
 //!
 //! `message`, `endpoint` and `percent` moved here from the object-store
 //! transports on 2026-09-09, where each had carried an identical copy; the
-//! signers, the Query API, the header dates and the judgement followed on
-//! 2026-09-14, when aws-sqs was found importing s3, aws-sns and aws-kinesis
-//! importing aws-sqs, and azure-event-hubs importing azure-service-bus. A
-//! technology that rides on HTTP shares HTTP's helpers through the http
-//! technology, never by copying a sibling's file and never by importing a
-//! sibling (ADR-0044).
+//! header dates and the judgement followed on 2026-09-14. A technology that
+//! rides on HTTP shares HTTP's helpers through the http technology, never
+//! by copying a sibling's file and never by importing a sibling (ADR-0044).
+//!
+//! What one vendor speaks over HTTP is that vendor's, not HTTP's: Signature
+//! Version 4 and the AWS Query API, and Azure's Shared Access Signature and
+//! the answers of a Service Bus namespace, came here on 2026-09-14 and left
+//! on the owner's ruling of 2026-09-22 for `xmip-core-transport-aws` and
+//! `xmip-core-transport-azure`, which ride on this crate.
 
 pub mod client;
 pub mod date;
 pub mod endpoint;
 pub mod message;
-pub mod namespace;
 pub mod percent;
-pub mod query;
-pub mod sas;
 pub mod server;
-pub mod signature;
-pub mod sigv4;
 pub mod target;
 
 use std::net::{TcpListener, TcpStream};
