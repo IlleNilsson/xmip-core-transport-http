@@ -10,8 +10,11 @@ the trait, the error vocabulary and the shared wire helpers; nothing in it names
 a protocol.
 
 This crate holds HTTP and nothing else: the request and its answer, the
-endpoint, percent-encoding, RFC 1123's date and the judgement of a status,
-which the technologies riding on HTTP share (ADR-0044). What a vendor speaks
+endpoint, RFC 1123's date and the judgement of a status, which the
+technologies riding on HTTP share (ADR-0044). Percent-encoding and the
+authority are URI's, not HTTP's, and are read and written in
+[xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net)
+since 2026-09-24, where the identifiers and the form shape reach them too. What a vendor speaks
 over it is the vendor's: Signature Version 4, the AWS Query API and
 `x-amz-date` are in
 [xmip-core-transport-aws](https://github.com/IlleNilsson/xmip-core-transport-aws),

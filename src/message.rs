@@ -1,22 +1,26 @@
-//! Plain HTTP/1.1 on the wire: one request and its answer over one
-//! connection, `Content-Length` framed, `Connection: close`.
+//! Plain HTTP/1.1 on the wire: a request and its answer, `Content-Length`
+//! framed, and `Connection: close` unless the message names its own
+//! `Connection` — `WebDAV` keeps its connection for the next method, and
+//! says `keep-alive` on both sides.
 //!
 //! What every REST API over HTTP is underneath its signature — S3, Azure
-//! Blob, Cloud Storage — and what their far ends read. Xmip's side writes a
-//! request and reads the answer; a technology's session reads a
-//! request and writes an answer. Both halves are here so the two cannot
-//! drift: a header written one way is read the same way.
+//! Blob, Cloud Storage — and what their far ends read, and the one HTTP
+//! codec the technologies riding on HTTP write and read with: `WebDAV`
+//! carried its own until 2026-09-24. Xmip's side writes a request and reads
+//! the answer; a technology's session reads a request and writes an answer.
+//! Both halves are here so the two cannot drift: a header written one way
+//! is read the same way.
 //!
-//! Chunked transfer encoding is not read. Every answer S3 gives to the four
-//! calls this crate makes carries a `Content-Length`; one that carries
-//! neither ends where the connection closes.
+//! Chunked transfer encoding is not read, and an answer that uses it is
+//! refused rather than misread. An answer carrying no `Content-Length`
+//! ends where the connection closes; a 204 or a 304 has no body at all.
 
 use std::io::{BufRead, BufReader, Read, Write};
 
 use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::wire::{MAX_BODY, header, read_head};
 
-use crate::percent::{decode, encode};
+use net::percent::{decode, encode};
 
 /// One request, as Xmip's side builds it and the far end reads it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -170,43 +174,57 @@ pub fn judge(
     })
 }
 
-/// Write `request` and read the answer.
+/// Write `request` and read the answer, on a connection that closes after.
 ///
 /// # Errors
 /// Where the connection broke, or the answer is not HTTP Xmip can read.
 pub fn exchange<S: Read + Write>(mut stream: S, request: &Request) -> Result<Response> {
-    let head = format!(
-        "{} {} HTTP/1.1\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        request.method,
-        request.target(),
-        lines(&request.headers),
-        request.body.len()
-    );
-    stream
-        .write_all(head.as_bytes())
-        .map_err(|e| classify("writing the request head", &e))?;
-    stream
-        .write_all(&request.body)
-        .map_err(|e| classify("writing the request body", &e))?;
-    stream
-        .flush()
-        .map_err(|e| classify("flushing the request", &e))?;
+    write_request(&mut stream, request)?;
     read_response(&mut BufReader::new(stream))
 }
 
-fn read_response(reader: &mut impl BufRead) -> Result<Response> {
+/// Write `request`, written and flushed: its request line, its headers,
+/// the length its body has, and `Connection: close` unless it names its
+/// own `Connection`.
+///
+/// # Errors
+/// Where the connection broke.
+pub fn write_request(writer: &mut impl Write, request: &Request) -> Result<()> {
+    let first = format!("{} {} HTTP/1.1", request.method, request.target());
+    write_message(
+        writer,
+        &first,
+        &request.headers,
+        &request.body,
+        "the request",
+    )
+}
+
+/// Read one answer.
+///
+/// # Errors
+/// A status line Xmip cannot read, a chunked body, a body over
+/// [`MAX_BODY`], or a connection that closed before answering.
+pub fn read_response(reader: &mut impl BufRead) -> Result<Response> {
     let head = read_head(reader)?;
     let status = head
         .first()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse().ok())
         .ok_or_else(|| protocol_error("an answer with no status line"))?;
-    if header(&head, "transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+    let chunked = header(&head, "transfer-encoding").is_some_and(|codings| {
+        codings
+            .split(',')
+            .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+    });
+    if chunked {
         return Err(protocol_error(
             "a chunked answer, which this transport does not read",
         ));
     }
-    let body = if header(&head, "content-length").is_some() {
+    let body = if status == 204 || status == 304 {
+        Vec::new()
+    } else if header(&head, "content-length").is_some() {
         read_body(reader, body_length(&head)?)?
     } else {
         let mut body = Vec::new();
@@ -258,35 +276,54 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>> {
     }))
 }
 
-/// The far end's answer, written and flushed.
+/// The far end's answer, written and flushed, `Connection: close` unless
+/// it names its own `Connection`.
 ///
 /// # Errors
 /// Where the connection broke.
 pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<()> {
-    let head = format!(
-        "HTTP/1.1 {} {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        response.status,
-        reason(response.status),
-        lines(&response.headers),
-        response.body.len()
-    );
-    writer
-        .write_all(head.as_bytes())
-        .map_err(|e| classify("writing the answer head", &e))?;
-    writer
-        .write_all(&response.body)
-        .map_err(|e| classify("writing the answer body", &e))?;
-    writer
-        .flush()
-        .map_err(|e| classify("flushing the answer", &e))
+    let first = format!("HTTP/1.1 {} {}", response.status, reason(response.status));
+    write_message(
+        writer,
+        &first,
+        &response.headers,
+        &response.body,
+        "the answer",
+    )
 }
 
-fn lines(headers: &[(String, String)]) -> String {
+/// One message: its first line, its headers, the length, the connection
+/// closing unless a header says otherwise, the blank line and the body.
+fn write_message(
+    writer: &mut impl Write,
+    first: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    what: &str,
+) -> Result<()> {
     let lines: Vec<String> = headers
         .iter()
         .map(|(name, value)| format!("{name}: {value}\r\n"))
         .collect();
-    lines.concat()
+    let lines = lines.concat();
+    let close = if find(headers, "connection").is_none() {
+        "Connection: close\r\n"
+    } else {
+        ""
+    };
+    let head = format!(
+        "{first}\r\n{lines}Content-Length: {}\r\n{close}\r\n",
+        body.len()
+    );
+    writer
+        .write_all(head.as_bytes())
+        .map_err(|e| classify(&format!("writing {what} head"), &e))?;
+    writer
+        .write_all(body)
+        .map_err(|e| classify(&format!("writing {what} body"), &e))?;
+    writer
+        .flush()
+        .map_err(|e| classify(&format!("flushing {what}"), &e))
 }
 
 fn headers_of(head: &[String]) -> Vec<(String, String)> {
@@ -332,17 +369,28 @@ pub(crate) fn read_body(reader: &mut impl Read, length: usize) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-fn reason(status: u16) -> &'static str {
+/// The phrase a status is written with; one the table does not know is
+/// written `Status`, which a reader ignores.
+#[must_use]
+pub const fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        207 => "Multi-Status",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        423 => "Locked",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Status",
     }
 }
@@ -393,6 +441,36 @@ mod tests {
         assert_eq!(read.body, b"UNA");
         assert!(read_request(&mut &b""[..]).expect("closed").is_none());
         assert!(read_request(&mut &b"GET\r\n\r\n"[..]).is_err());
+    }
+
+    #[test]
+    fn a_connection_kept_carries_the_next_message_and_no_body_is_read_past_a_204() {
+        let kept = Request::new("PROPFIND", "/orders")
+            .header("Host", "dav.example")
+            .header("Connection", "keep-alive");
+        let mut written = Vec::new();
+        write_request(&mut written, &kept).expect("written");
+        write_request(&mut written, &Request::new("GET", "/orders/1")).expect("written");
+        let text = String::from_utf8_lossy(&written).into_owned();
+        assert_eq!(text.matches("Connection:").count(), 2, "{text}");
+        assert!(text.contains("Connection: keep-alive\r\n"), "{text}");
+        let mut reader = &written[..];
+        let first = read_request(&mut reader).expect("read").expect("one");
+        assert_eq!(first.method, "PROPFIND");
+        let second = read_request(&mut reader).expect("read").expect("two");
+        assert_eq!(second.path, "/orders/1");
+        let mut answers = Vec::new();
+        let open = Response::new(204).header("Connection", "keep-alive");
+        write_response(&mut answers, &open).expect("written");
+        write_response(&mut answers, &Response::new(207).body(b"<a/>")).expect("written");
+        assert!(answers.starts_with(b"HTTP/1.1 204 No Content\r\n"));
+        let mut reader = &answers[..];
+        assert!(read_response(&mut reader).expect("204").body.is_empty());
+        let multi = read_response(&mut reader).expect("207");
+        assert_eq!((multi.status, multi.body.as_slice()), (207, &b"<a/>"[..]));
+        let gzip = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+        assert!(read_response(&mut &gzip[..]).is_err(), "chunked last");
+        assert!(read_response(&mut &b""[..]).is_err(), "closed early");
     }
 
     #[test]
