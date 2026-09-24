@@ -17,15 +17,18 @@
 //!               judgement of an answer, for the technologies that ride
 //!               on HTTP
 //! endpoint.rs   an `http://` or `https://` endpoint and a connection to it
-//! percent.rs    percent-encoding, RFC 3986's unreserved set
 //! date.rs       the moment a header carries: RFC 1123
 //! ```
 //!
-//! `message`, `endpoint` and `percent` moved here from the object-store
-//! transports on 2026-09-09, where each had carried an identical copy; the
-//! header dates and the judgement followed on 2026-09-14. A technology that
-//! rides on HTTP shares HTTP's helpers through the http technology, never
-//! by copying a sibling's file and never by importing a sibling (ADR-0044).
+//! `message` and `endpoint` moved here from the object-store transports on
+//! 2026-09-09, where each had carried an identical copy; the header dates
+//! and the judgement followed on 2026-09-14. A technology that rides on
+//! HTTP shares HTTP's helpers through the http technology, never by copying
+//! a sibling's file and never by importing a sibling (ADR-0044).
+//! Percent-encoding came with them and left on 2026-09-24 for
+//! `xmip-core-library-net`, beside the authority, where the identifier and
+//! the form shape that also write it reach it; a technology riding on HTTP
+//! calls `net::percent` directly.
 //!
 //! What one vendor speaks over HTTP is that vendor's, not HTTP's: Signature
 //! Version 4 and the AWS Query API, and Azure's Shared Access Signature and
@@ -37,7 +40,6 @@ pub mod client;
 pub mod date;
 pub mod endpoint;
 pub mod message;
-pub mod percent;
 pub mod server;
 pub mod target;
 
@@ -48,6 +50,7 @@ use transport::Arrived;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
@@ -100,7 +103,7 @@ impl HttpTransport {
     /// Send over TLS, or say why not.
     #[cfg(feature = "tls")]
     fn send_secure(target: &HttpTarget<'_>, tcp: TcpStream, bytes: &[u8]) -> Result<()> {
-        let host = transport::wire::host_of(target.authority);
+        let host = net::authority::host_of(target.authority);
         let guarded = tls::client(host, tcp)?;
 
         client::exchange(guarded, target, bytes)
@@ -157,31 +160,14 @@ impl HttpTransport {
     }
 }
 
-/// A bound listener waiting for its one request.
-struct Listening {
-    transport: HttpTransport,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        self.transport.accept_one(&self.listener)
-    }
-}
-
 impl Loopback for HttpTransport {
+    /// A bound listener waiting for its one request.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            transport: self.clone(),
-            listener,
-            address,
-        }))
+        let transport = self.clone();
+        Ok(Box::new(Listening::new(
+            move |listener: &TcpListener| transport.accept_one(listener),
+            self.bind()?,
+        )))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {

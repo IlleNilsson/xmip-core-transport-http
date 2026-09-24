@@ -1,7 +1,7 @@
 //! Where a send is going, read out of the target string.
 
+use net::authority::with_default_port;
 use transport::error::{Result, protocol_error};
-use transport::wire::with_default_port;
 
 /// A parsed `http://` or `https://` target.
 ///

@@ -12,9 +12,9 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::target::HttpTarget;
+use net::authority::host_of;
 use transport::error::Result;
 use transport::socket;
-use transport::wire::host_of;
 
 /// Anything a request can travel over: a plain socket, or one wrapped in
 /// TLS.
