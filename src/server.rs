@@ -1,14 +1,19 @@
-//! Taking one request off a connection and answering it.
+//! Taking one request off a connection and answering it, in the version
+//! of HTTP the connection opens with.
 //!
-//! The request is read and the answer written by `net::http`, the one
-//! HTTP/1.1 codec; what is the transport's is the connection accepted
-//! within its timeout, what a Receive Location answers, and the Stream
-//! that arrived.
+//! A connection that opens with HTTP/2's preface — a client speaking it
+//! by prior knowledge — is served by `net::http2`; any other by
+//! `net::http`, the one HTTP/1.1 codec. Nothing is lost telling them
+//! apart: the octets read to tell are read again. What is the transport's
+//! is the connection accepted within its timeout, what a Receive Location
+//! answers, and the Stream that arrived.
 
+use std::io::BufReader;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use net::http::{Request, Response, read_request, write_response};
+use net::http2::{Replayed, Server, sniff};
 use transport::Arrived;
 use transport::error::{Result, protocol_error};
 use transport::socket;
@@ -69,12 +74,23 @@ fn take_one<T>(
     // The wait for the connection is bounded as well as the reads. This did
     // a bare accept until 2026-09-21, so a far end whose near end never
     // connected waited for good, and a hang has no verdict.
-    let (stream, peer) = socket::accept_tcp(listener, timeout)?;
-    let (mut reader, mut writer) = socket::split(stream)?;
-    let request = read_request(&mut reader)?
+    let (mut stream, peer) = socket::accept_tcp(listener, timeout)?;
+    let (h2, first) = sniff(&mut stream)?;
+    let mut connection = Replayed::new(first, stream);
+    if h2 {
+        let mut server = Server::handshake(connection)?;
+        let (id, request) = server
+            .next_request()?
+            .ok_or_else(|| protocol_error("an HTTP/2 connection that sent no request"))?;
+        let (report, response) = answer(&request);
+        server.respond(id, &response)?;
+        server.close();
+        return Ok((report, peer));
+    }
+    let request = read_request(&mut BufReader::new(&mut connection))?
         .ok_or_else(|| protocol_error("a connection that sent no request"))?;
     let (report, response) = answer(&request);
-    write_response(&mut writer, &response)?;
+    write_response(&mut connection, &response)?;
     Ok((report, peer))
 }
 
@@ -107,5 +123,28 @@ mod tests {
         let (served, closed) = far_end.join().expect("thread");
         assert_eq!(served.expect("served"), "PUT");
         assert!(closed.is_err(), "a connection that sent nothing");
+    }
+
+    #[test]
+    fn a_connection_that_opens_with_the_preface_is_served_in_http_2() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let timeout = Some(Duration::from_secs(5));
+        let far_end = std::thread::spawn(move || {
+            serve_one(&listener, timeout, |request| {
+                let answer = Response::new(200)
+                    .body(&request.body)
+                    .trailer("grpc-status", "0");
+                (request.header_value("host").map(str::to_string), answer)
+            })
+        });
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let request = Request::new("POST", at.path())
+            .header("Host", &at.authority())
+            .body(b"UNB");
+        let answer = endpoint::exchange(&at, timeout, true, &request).expect("answered");
+        assert_eq!((answer.status, answer.body.as_slice()), (200, &b"UNB"[..]));
+        assert_eq!(answer.trailer_value("grpc-status"), Some("0"));
+        let host = far_end.join().expect("thread").expect("served");
+        assert_eq!(host.as_deref(), Some(address.as_str()));
     }
 }
