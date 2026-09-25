@@ -28,7 +28,9 @@ tls = { package = "xmip-core-library-tls", git = "https://github.com/IlleNilsson
 # The estate's encoding primitives: the civil calendar a date header is
 # written from.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
-# The authority a target names, and percent-encoding of a request's query.
+# The URL a Location names (`net::Endpoint`) and HTTP/1.1 on the wire
+# (`net::http`): the one codec this transport and every technology riding
+# on it exchange a request for its answer with.
 net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
 
 [dev-dependencies]

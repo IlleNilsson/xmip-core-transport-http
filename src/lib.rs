@@ -8,17 +8,22 @@
 //! that, and the two behave differently at the gate for that reason alone.
 //!
 //! ```text
-//! target.rs     where a send is going
-//! client.rs     writing the request, reading the answer
+//! endpoint.rs   a connection to an `http://` or `https://` endpoint, TLS
+//!               behind the `tls` feature
 //! server.rs     taking one request off a connection, and serving one to
 //!               a technology's session
-//! tls.rs        https, behind the `tls` feature
-//! message.rs    one request and its answer, both directions, and the
-//!               judgement of an answer, for the technologies that ride
-//!               on HTTP
-//! endpoint.rs   an `http://` or `https://` endpoint and a connection to it
+//! status.rs     the judgement of an answer's status, for the
+//!               technologies that ride on HTTP
 //! date.rs       the moment a header carries: RFC 1123
 //! ```
+//!
+//! The request and its answer, both halves, and the exchange of one for
+//! the other are `net::http`'s, and the URL a Location names is read by
+//! `net::Endpoint`, in `xmip-core-library-net`: one HTTP/1.1 codec for the
+//! transport, the technologies riding on it and the capabilities that ask
+//! a service beside them. This crate carried a second codec, which refused
+//! a chunked answer, a third writer to send a Stream, and its own URL
+//! reader, `HttpTarget`, until 2026-09-25.
 //!
 //! `message` and `endpoint` moved here from the object-store transports on
 //! 2026-09-09, where each had carried an identical copy; the header dates
@@ -36,14 +41,12 @@
 //! on the owner's ruling of 2026-09-22 for `xmip-core-transport-aws` and
 //! `xmip-core-transport-azure`, which ride on this crate.
 
-pub mod client;
 pub mod date;
 pub mod endpoint;
-pub mod message;
 pub mod server;
-pub mod target;
+pub mod status;
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::time::Duration;
 
 use transport::Arrived;
@@ -54,7 +57,8 @@ use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
-use target::HttpTarget;
+use net::Endpoint;
+use net::http::Request;
 
 #[derive(Clone)]
 pub struct HttpTransport {
@@ -99,25 +103,6 @@ impl HttpTransport {
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
         server::accept_one(listener, self.timeout)
     }
-
-    /// Send over TLS, or say why not.
-    #[cfg(feature = "tls")]
-    fn send_secure(target: &HttpTarget<'_>, tcp: TcpStream, bytes: &[u8]) -> Result<()> {
-        let host = net::authority::host_of(target.authority);
-        let guarded = tls::client(host, tcp)?;
-
-        client::exchange(guarded, target, bytes)
-    }
-
-    #[cfg(not(feature = "tls"))]
-    #[allow(clippy::needless_pass_by_value)]
-    fn send_secure(_target: &HttpTarget<'_>, tcp: TcpStream, _bytes: &[u8]) -> Result<()> {
-        drop(tcp);
-
-        Err(transport::error::protocol_error(
-            "https was asked for and this build has no tls feature compiled in",
-        ))
-    }
 }
 
 impl Transport for HttpTransport {
@@ -136,18 +121,25 @@ impl Transport for HttpTransport {
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        let target = HttpTarget::parse(target)?;
+        let endpoint = Endpoint::parse(target)?;
+        let request = Request::new("POST", endpoint.path())
+            .header("Host", &endpoint.authority())
+            .header("Content-Type", "application/octet-stream")
+            .body(bytes);
 
         // The connect is bounded as well as the reads. This was a bare
         // connect until 2026-09-21, which waits on the operating system's
         // schedule, and longer still on a machine out of ephemeral ports.
-        let tcp = socket::connect_tcp(&target.address(), self.timeout)?;
+        let connection = endpoint::connect(&endpoint, self.timeout)?;
+        let answer = net::http::exchange(connection, &request)?;
 
-        if target.secure {
-            return Self::send_secure(&target, tcp, bytes);
-        }
-
-        client::exchange(tcp, &target, bytes)
+        status::judge(
+            "the server",
+            answer,
+            |answer| answer.reason.clone(),
+            |_| false,
+        )
+        .map(|_| ())
     }
 }
 

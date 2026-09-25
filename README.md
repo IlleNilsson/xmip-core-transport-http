@@ -7,11 +7,22 @@ owns the direction-neutral `Transport` trait this crate implements (ADR-0010).
 Lifted out of the capability crate on 2026-09-07, where it had lived as
 `src/http` since 2026-08-27 waiting for this repository. The capability keeps
 the trait, the error vocabulary and the shared wire helpers; nothing in it names
-a protocol.
+a protocol. The head a line-oriented protocol reads — lines, then a blank
+line — left it on 2026-09-25 for `net::head` in
+[xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net).
 
-This crate holds HTTP and nothing else: the request and its answer, the
-endpoint, RFC 1123's date and the judgement of a status, which the
-technologies riding on HTTP share (ADR-0044). Percent-encoding and the
+This crate holds what is the HTTP transport's own: the connection to an
+endpoint, HTTPS through
+[xmip-core-library-tls](https://github.com/IlleNilsson/xmip-core-library-tls),
+a request taken off a connection and answered, RFC 1123's date and the
+judgement of a status, which the technologies riding on HTTP share
+(ADR-0044). The request and its answer — both halves, read by length,
+chunks or the end — and the URL a Location names are `net::http` and
+`net::Endpoint` in
+[xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net)
+since 2026-09-25: one HTTP/1.1 codec, which the technologies riding on HTTP
+call directly. This crate carried a second one, a third writer to send a
+Stream and its own URL reader until then. Percent-encoding and the
 authority are URI's, not HTTP's, and are read and written in
 [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net)
 since 2026-09-24, where the identifiers and the form shape reach them too. What a vendor speaks
