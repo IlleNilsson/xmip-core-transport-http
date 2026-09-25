@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/IlleNilsson/xmip-core-transport-http"
-description = "HTTP transport: one request body is one Stream, with a reply channel; HTTPS behind the tls feature. A xmip-core-transport technology."
+description = "HTTP transport: one request body is one Stream, with a reply channel. HTTP/2 or HTTP/1.1 per connection, agreed by ALPN over TLS or known beforehand (h2c) where configured; a Receive Location serves either. HTTPS behind the tls feature. A xmip-core-transport technology."
 publish = false
 
 [lib]

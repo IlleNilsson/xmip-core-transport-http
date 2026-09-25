@@ -1,6 +1,6 @@
 # xmip-core-transport-http
 
-HTTP transport: one request body is one Stream, with a reply channel; HTTPS behind the tls feature. A technology of
+HTTP transport: one request body is one Stream, with a reply channel; HTTP/2 or HTTP/1.1 per connection; HTTPS behind the tls feature. A technology of
 [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport), which
 owns the direction-neutral `Transport` trait this crate implements (ADR-0010).
 
@@ -33,6 +33,20 @@ and Azure's Shared Access Signature and a Service Bus namespace's answers in
 [xmip-core-transport-azure](https://github.com/IlleNilsson/xmip-core-transport-azure).
 They lived here from 2026-09-14 until the owner's ruling of 2026-09-22 moved
 them, on 2026-09-24.
+
+## HTTP/2 or HTTP/1.1, per connection
+
+Since 2026-09-25 the version is the connection's. `endpoint::open` offers
+`h2` and `http/1.1` by ALPN over TLS and reports what the server selected;
+in the clear it speaks HTTP/2 only where the Location says so —
+`HttpTransport::speaking_h2c`, prior knowledge, since RFC 9113 removed
+HTTP/1.1's `Upgrade` — and HTTP/1.1 otherwise. `endpoint::exchange` sends
+a request in whichever it is, through `net::http` or `net::http2`. A
+request served (`server::serve_one`, a Receive Location, the Loopback far
+end) is answered in HTTP/2 where the connection opens with its preface, and
+in HTTP/1.1 otherwise; the octets read to tell are read again. The
+technologies riding on HTTP connect with `endpoint::connect`, which offers
+nothing, and keep speaking HTTP/1.1 unchanged. HTTP/3 is open problem 30.
 
 ## Toolchain
 

@@ -9,19 +9,30 @@
 //!
 //! ```text
 //! endpoint.rs   a connection to an `http://` or `https://` endpoint, TLS
-//!               behind the `tls` feature
-//! server.rs     taking one request off a connection, and serving one to
-//!               a technology's session
+//!               behind the `tls` feature, and the version it speaks
+//! server.rs     taking one request off a connection, HTTP/2 or HTTP/1.1,
+//!               and serving one to a technology's session
 //! status.rs     the judgement of an answer's status, for the
 //!               technologies that ride on HTTP
 //! date.rs       the moment a header carries: RFC 1123
 //! ```
 //!
+//! **HTTP/2 or HTTP/1.1, per connection.** A Send Location offers `h2`
+//! and `http/1.1` by ALPN over TLS and speaks what the server selects; in
+//! the clear it speaks HTTP/2 only where it is configured to
+//! ([`HttpTransport::speaking_h2c`], prior knowledge — RFC 9113 removed
+//! the `Upgrade`), and HTTP/1.1 otherwise. A Receive Location, and the
+//! Loopback far end, serve either: a connection that opens with HTTP/2's
+//! preface is answered in HTTP/2. The technologies riding on HTTP connect
+//! with [`endpoint::connect`], which offers nothing, and speak HTTP/1.1
+//! through `net::http` unchanged.
+//!
 //! The request and its answer, both halves, and the exchange of one for
-//! the other are `net::http`'s, and the URL a Location names is read by
-//! `net::Endpoint`, in `xmip-core-library-net`: one HTTP/1.1 codec for the
-//! transport, the technologies riding on it and the capabilities that ask
-//! a service beside them. This crate carried a second codec, which refused
+//! the other are `net::http`'s and `net::http2`'s, and the URL a Location
+//! names is read by `net::Endpoint`, in `xmip-core-library-net`: one codec
+//! per version for the transport, the technologies riding on it and the
+//! capabilities that ask a service beside them. This crate carried a
+//! second HTTP/1.1 codec, which refused
 //! a chunked answer, a third writer to send a Stream, and its own URL
 //! reader, `HttpTarget`, until 2026-09-25.
 //!
@@ -64,6 +75,7 @@ use net::http::Request;
 pub struct HttpTransport {
     bind: String,
     timeout: Option<Duration>,
+    h2c: bool,
 }
 
 impl HttpTransport {
@@ -72,7 +84,17 @@ impl HttpTransport {
         Self {
             bind: bind.into(),
             timeout: None,
+            h2c: false,
         }
+    }
+
+    /// Speak HTTP/2 to an `http://` endpoint by prior knowledge (`h2c`),
+    /// where the service is known to; over TLS the version is agreed by
+    /// ALPN whatever this says.
+    #[must_use]
+    pub const fn speaking_h2c(mut self) -> Self {
+        self.h2c = true;
+        self
     }
 
     /// Give up on a connection that does not arrive, or stops sending, as
@@ -130,8 +152,7 @@ impl Transport for HttpTransport {
         // The connect is bounded as well as the reads. This was a bare
         // connect until 2026-09-21, which waits on the operating system's
         // schedule, and longer still on a machine out of ephemeral ports.
-        let connection = endpoint::connect(&endpoint, self.timeout)?;
-        let answer = net::http::exchange(connection, &request)?;
+        let answer = endpoint::exchange(&endpoint, self.timeout, self.h2c, &request)?;
 
         status::judge(
             "the server",
@@ -188,6 +209,24 @@ mod tests {
         assert_eq!(arrived.bytes, b"<order/>");
         assert!(arrived.origin_uri.starts_with("http://127.0.0.1:"));
         assert!(arrived.origin_uri.ends_with("/orders"));
+    }
+
+    #[test]
+    fn the_loopback_far_end_serves_http_2_and_http_1_1_alike() {
+        for sender in [
+            HttpTransport::loopback(),
+            HttpTransport::loopback().speaking_h2c(),
+        ] {
+            let far = HttpTransport::loopback().far_end().expect("far end");
+            let address = far.address().to_string();
+            let taking = std::thread::spawn(move || far.take_one());
+            sender
+                .send(&format!("http://{address}/round-trip"), b"UNA:+.? '")
+                .expect("sent");
+            let arrived = taking.join().expect("thread").expect("arrived");
+            assert_eq!(arrived.bytes, b"UNA:+.? '");
+            assert!(arrived.origin_uri.ends_with("/round-trip"));
+        }
     }
 
     #[test]
