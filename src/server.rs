@@ -1,15 +1,17 @@
 //! Taking one request off a connection and answering it.
+//!
+//! The request is read and the answer written by `net::http`, the one
+//! HTTP/1.1 codec; what is the transport's is the connection accepted
+//! within its timeout, what a Receive Location answers, and the Stream
+//! that arrived.
 
-use std::io::{BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
+use net::http::{Request, Response, read_request, write_response};
 use transport::Arrived;
-use transport::error::{Result, classify, protocol_error};
+use transport::error::{Result, protocol_error};
 use transport::socket;
-use transport::wire::read_head;
-
-use crate::message::{self, Request, Response, body_length, read_body};
 
 /// What Xmip answers a caller.
 ///
@@ -17,7 +19,7 @@ use crate::message::{self, Request, Response, body_length, read_body};
 /// promised nothing else — which is exactly the state a Stream is in once the
 /// arrival gate has passed and before the Journey exists. `200 OK` would claim
 /// the work is done.
-const ACCEPTED: &[u8] = b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const ACCEPTED: u16 = 202;
 
 /// Accept one request within `timeout`, with `timeout` on its reads, and
 /// answer it. `None` waits forever, which is what a listening Receive
@@ -26,27 +28,16 @@ const ACCEPTED: &[u8] = b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnecti
 /// # Errors
 ///
 /// Where nothing connected within `timeout`, the connection failed, the
-/// request was malformed, or the body was larger than
-/// [`transport::wire::MAX_BODY`].
+/// request was malformed, or the body was larger than `net::http::MAX_BODY`.
 pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
-    // The wait for the connection is bounded as well as the reads. This did
-    // a bare accept until 2026-09-21, so a far end whose near end never
-    // connected waited for good, and a hang has no verdict.
-    let (mut stream, peer) = socket::accept_tcp(listener, timeout)?;
+    let ((target, bytes), peer) = take_one(listener, timeout, |request| {
+        (
+            (request.target(), request.body.clone()),
+            Response::new(ACCEPTED),
+        )
+    })?;
 
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| classify("cloning the connection", &e))?,
-    );
-
-    let head = read_head(&mut reader)?;
-    let path = request_path(&head)?;
-    let bytes = read_body(&mut reader, body_length(&head)?)?;
-
-    answer(&mut stream)?;
-
-    Ok(Arrived::new(format!("http://{peer}{path}"), bytes))
+    Ok(Arrived::new(format!("http://{peer}{target}"), bytes))
 }
 
 /// Accept one connection on `listener`, with `timeout` on its reads, read
@@ -66,64 +57,32 @@ pub fn serve_one<T>(
     timeout: Option<Duration>,
     answer: impl FnOnce(&Request) -> (T, Response),
 ) -> Result<T> {
-    let (stream, _) = socket::accept_tcp(listener, timeout)?;
+    take_one(listener, timeout, answer).map(|(report, _)| report)
+}
+
+/// [`serve_one`], and the peer it served.
+fn take_one<T>(
+    listener: &TcpListener,
+    timeout: Option<Duration>,
+    answer: impl FnOnce(&Request) -> (T, Response),
+) -> Result<(T, SocketAddr)> {
+    // The wait for the connection is bounded as well as the reads. This did
+    // a bare accept until 2026-09-21, so a far end whose near end never
+    // connected waited for good, and a hang has no verdict.
+    let (stream, peer) = socket::accept_tcp(listener, timeout)?;
     let (mut reader, mut writer) = socket::split(stream)?;
-    let request = message::read_request(&mut reader)?
+    let request = read_request(&mut reader)?
         .ok_or_else(|| protocol_error("a connection that sent no request"))?;
     let (report, response) = answer(&request);
-    message::write_response(&mut writer, &response)?;
-    Ok(report)
-}
-
-/// The path out of the request line: `POST /orders HTTP/1.1`.
-fn request_path(head: &[String]) -> Result<String> {
-    let request_line = head
-        .first()
-        .ok_or_else(|| protocol_error("a connection that sent no request"))?;
-
-    Ok(request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_string())
-}
-
-fn answer(stream: &mut TcpStream) -> Result<()> {
-    stream
-        .write_all(ACCEPTED)
-        .map_err(|e| classify("answering the request", &e))?;
-
-    stream
-        .flush()
-        .map_err(|e| classify("flushing the answer", &e))
+    write_response(&mut writer, &response)?;
+    Ok((report, peer))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::endpoint;
-
-    fn head(lines: &[&str]) -> Vec<String> {
-        lines.iter().map(|line| (*line).to_string()).collect()
-    }
-
-    #[test]
-    fn the_path_comes_from_the_request_line() {
-        assert_eq!(
-            request_path(&head(&["POST /orders HTTP/1.1"])).expect("parsed"),
-            "/orders"
-        );
-    }
-
-    #[test]
-    fn a_request_line_without_a_path_defaults_to_root() {
-        assert_eq!(request_path(&head(&["POST"])).expect("parsed"), "/");
-    }
-
-    #[test]
-    fn a_connection_that_sent_nothing_is_a_protocol_error() {
-        assert!(request_path(&[]).is_err());
-    }
+    use net::Endpoint;
 
     #[test]
     fn one_request_is_served_with_what_the_session_answers() {
@@ -139,11 +98,12 @@ mod tests {
             let closed = serve_one(&listener, timeout, |_| ((), Response::new(200)));
             (served, closed)
         });
-        let stream = endpoint::connect(&format!("http://{address}"), timeout).expect("connect");
+        let at = Endpoint::parse(&format!("http://{address}")).expect("parsed");
+        let stream = endpoint::connect(&at, timeout).expect("connect");
         let request = Request::new("PUT", "/orders").body(b"UNA");
-        let answer = message::exchange(stream, &request).expect("answered");
+        let answer = net::http::exchange(stream, &request).expect("answered");
         assert_eq!((answer.status, answer.body), (201, b"UNA".to_vec()));
-        drop(endpoint::connect(&format!("http://{address}"), timeout).expect("connect"));
+        drop(endpoint::connect(&at, timeout).expect("connect"));
         let (served, closed) = far_end.join().expect("thread");
         assert_eq!(served.expect("served"), "PUT");
         assert!(closed.is_err(), "a connection that sent nothing");
