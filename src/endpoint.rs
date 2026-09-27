@@ -24,11 +24,8 @@
 //! and every HTTP/2 request opened a connection of its own, preface and
 //! settings included.
 
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use net::Endpoint;
@@ -36,6 +33,7 @@ use net::http::{Request, Response, Version};
 use net::http2::Client;
 use transport::error::Result;
 use transport::socket;
+use transport::{Pool, Pooled};
 
 /// Anything a request can travel over: a plain socket, or one wrapped in
 /// TLS. Sendable, so a connection kept open between requests can be held
@@ -108,28 +106,39 @@ pub fn open(
 
 /// A connection kept open between requests, in the version it speaks.
 enum Kept {
-    Http11(Box<dyn Connection>),
+    /// HTTP/1.1, and whether its last answer left it open for the next.
+    Http11 {
+        connection: Box<dyn Connection>,
+        open: bool,
+    },
     Http2(Box<Client<Box<dyn Connection>>>),
+}
+
+impl Pooled for Kept {
+    /// Not where the last answer said `Connection: close` or ended with the
+    /// connection, nor where the server said `GOAWAY`.
+    fn usable(&mut self) -> bool {
+        match self {
+            Self::Http11 { open, .. } => *open,
+            Self::Http2(client) => !client.going_away(),
+        }
+    }
 }
 
 /// Where kept connections are found: the endpoint's scheme and address,
 /// and what was offered when they were opened.
 type Key = (bool, String, Offer);
 
-/// The connections a transport keeps to the endpoints it sends to: opened
-/// on the first request to an endpoint and kept for the next, by the
-/// transport and every clone of it and every client it hands them to.
-///
-/// A connection is taken for one request and put back after, so requests
-/// on several threads each have one; nothing waits on another's answer. One
-/// the far end closed meanwhile — an idle timeout, a `GOAWAY`, a restart —
-/// fails on reuse, and the request goes again on a new connection: at
-/// least once, as every send in Xmip is. One whose answer says
-/// `Connection: close`, or ends with the connection, is not kept.
+/// The connections a transport keeps to the endpoints it sends to: the
+/// capability's [`Pool`] of HTTP connections, opened on the first request
+/// to an endpoint and kept for the next, by the transport and every clone
+/// of it and every client it hands them to. One the far end closed
+/// meanwhile — an idle timeout, a `GOAWAY`, a restart — fails on reuse,
+/// and the request goes again on a new connection, as the pool does for
+/// every session.
 #[derive(Clone, Default)]
 pub struct Connections {
-    kept: Arc<Mutex<BTreeMap<Key, Vec<Kept>>>>,
-    opened: Arc<AtomicUsize>,
+    pool: Pool<Kept, Key>,
 }
 
 impl Connections {
@@ -153,56 +162,45 @@ impl Connections {
         request: &Request,
     ) -> Result<Response> {
         let key = (endpoint.secure(), endpoint.address(), offer);
-        let reused = self.all().get_mut(&key).and_then(Vec::pop);
-        if let Some(Ok((answer, kept))) = reused.map(|kept| exchange_on(kept, request)) {
-            self.keep(key, kept);
-            return Ok(answer);
-        }
-        let (connection, version) = open(endpoint, timeout, offer)?;
-        self.opened.fetch_add(1, Ordering::Relaxed);
-        let fresh = match version {
-            Version::Http11 => Kept::Http11(connection),
-            Version::Http2 => {
-                let scheme = if endpoint.secure() { "https" } else { "http" };
-                Kept::Http2(Box::new(Client::handshake(connection, scheme)?))
-            }
-        };
-        let (answer, kept) = exchange_on(fresh, request)?;
-        self.keep(key, kept);
-        Ok(answer)
+        self.pool.exchange(
+            &key,
+            || kept(endpoint, timeout, offer),
+            |kept| exchange_on(kept, request),
+        )
     }
 
     /// How many connections these have opened: one per endpoint while the
     /// far end keeps them, however many requests.
     #[must_use]
     pub fn opened(&self) -> usize {
-        self.opened.load(Ordering::Relaxed)
-    }
-
-    fn all(&self) -> MutexGuard<'_, BTreeMap<Key, Vec<Kept>>> {
-        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn keep(&self, key: Key, kept: Option<Kept>) {
-        if let Some(kept) = kept {
-            self.all().entry(key).or_default().push(kept);
-        }
+        self.pool.opened()
     }
 }
 
-/// `request` on `kept`, its answer, and the connection back where it can
-/// carry the next.
-fn exchange_on(kept: Kept, request: &Request) -> Result<(Response, Option<Kept>)> {
+/// A new connection to `endpoint`, handshaken where it speaks HTTP/2.
+fn kept(endpoint: &Endpoint, timeout: Option<Duration>, offer: Offer) -> Result<Kept> {
+    let (connection, version) = open(endpoint, timeout, offer)?;
+    Ok(match version {
+        Version::Http11 => Kept::Http11 {
+            connection,
+            open: true,
+        },
+        Version::Http2 => {
+            let scheme = if endpoint.secure() { "https" } else { "http" };
+            Kept::Http2(Box::new(Client::handshake(connection, scheme)?))
+        }
+    })
+}
+
+/// `request` on `kept`, and its answer.
+fn exchange_on(kept: &mut Kept, request: &Request) -> Result<Response> {
     Ok(match kept {
-        Kept::Http11(mut connection) => {
-            let (answer, reusable) = net::http::exchange_kept(&mut connection, request)?;
-            (answer, reusable.then_some(Kept::Http11(connection)))
+        Kept::Http11 { connection, open } => {
+            let (answer, reusable) = net::http::exchange_kept(connection, request)?;
+            *open = reusable;
+            answer
         }
-        Kept::Http2(mut client) => {
-            let answer = client.send(request)?;
-            let open = !client.going_away();
-            (answer, open.then_some(Kept::Http2(client)))
-        }
+        Kept::Http2(client) => client.send(request)?,
     })
 }
 

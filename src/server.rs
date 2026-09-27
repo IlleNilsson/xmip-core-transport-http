@@ -35,14 +35,20 @@ const ACCEPTED: u16 = 202;
 /// Where nothing connected within `timeout`, the connection failed, the
 /// request was malformed, or the body was larger than `net::MAX_BODY`.
 pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
-    let ((target, bytes), peer) = take_one(listener, timeout, |request| {
-        (
-            (request.target(), request.body.clone()),
-            Response::new(ACCEPTED),
-        )
-    })?;
+    serve_one_from(listener, timeout, arrival)
+}
 
-    Ok(Arrived::new(format!("http://{peer}{target}"), bytes))
+/// A request taken into custody as the Stream it carries, from `peer`, and
+/// the `202 Accepted` that says so: what a Receive Location answers, on a
+/// connection stood up for one request or one its caller keeps
+/// ([`crate::inbound`]).
+#[must_use]
+pub fn arrival(request: &Request, peer: SocketAddr) -> (Arrived, Response) {
+    let origin = format!("http://{peer}{}", request.target());
+    (
+        Arrived::new(origin, request.body.clone()),
+        Response::new(ACCEPTED),
+    )
 }
 
 /// Accept one connection on `listener`, with `timeout` on its reads, read
@@ -62,20 +68,26 @@ pub fn serve_one<T>(
     timeout: Option<Duration>,
     answer: impl FnOnce(&Request) -> (T, Response),
 ) -> Result<T> {
-    take_one(listener, timeout, answer).map(|(report, _)| report)
+    serve_one_from(listener, timeout, |request, _| answer(request))
 }
 
-/// [`serve_one`], and the peer it served.
-fn take_one<T>(
+/// [`serve_one`], with the peer it serves handed to `answer`: an origin
+/// that names who posted — AS2, AS4 — reads it here rather than accepting
+/// the connection itself, which both did until 2026-09-27 because this
+/// kept the peer to itself.
+///
+/// # Errors
+/// As [`serve_one`].
+pub fn serve_one_from<T>(
     listener: &TcpListener,
     timeout: Option<Duration>,
-    answer: impl FnOnce(&Request) -> (T, Response),
-) -> Result<(T, SocketAddr)> {
+    answer: impl FnOnce(&Request, SocketAddr) -> (T, Response),
+) -> Result<T> {
     // The wait for the connection is bounded as well as the reads. This did
     // a bare accept until 2026-09-21, so a far end whose near end never
     // connected waited for good, and a hang has no verdict.
     let (stream, peer) = socket::accept_tcp(listener, timeout)?;
-    Ok((answer_on(stream, answer)?, peer))
+    answer_on(stream, |request| answer(request, peer))
 }
 
 /// Read the one request a connection already accepted carries, in the

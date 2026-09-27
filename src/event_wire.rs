@@ -40,8 +40,8 @@ use event::binding::Carried;
 use event::forward::Wire;
 use net::Endpoint;
 use net::http::Request;
-use resilience::Failure;
 use transport::error::Result;
+use xcore::Failure;
 use xcore::PartyId;
 
 use crate::endpoint::{Connections, Offer};
@@ -247,12 +247,12 @@ mod tests {
         let refused = wire
             .carry(PartyId::new(2), &Carried::default())
             .expect_err("no webhook");
-        assert!(!refused.is_retryable());
-        assert!(refused.reason.contains("no webhook"), "{refused}");
+        assert!(!refused.retryable);
+        assert!(refused.message.contains("no webhook"), "{refused}");
         let unreachable = wire
             .carry(PartyId::new(1), &Carried::default())
             .expect_err("nothing listens");
-        assert!(unreachable.is_retryable(), "{unreachable}");
+        assert!(unreachable.retryable, "{unreachable}");
         assert!(Webhook::new("hook.example/x").is_err(), "not HTTP");
     }
 }

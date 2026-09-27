@@ -13,6 +13,9 @@
 //!               connections a sender keeps between requests
 //! server.rs     taking one request off a connection, HTTP/2 or HTTP/1.1,
 //!               and serving one to a technology's session
+//! inbound.rs    what a Receive Location keeps between receives: its
+//!               listener, and the connections its callers keep open,
+//!               answered request after request
 //! status.rs     the judgement of an answer's status, for the
 //!               technologies that ride on HTTP
 //! date.rs       the moment a header carries: RFC 1123
@@ -60,6 +63,7 @@
 pub mod date;
 pub mod endpoint;
 pub mod event_wire;
+pub mod inbound;
 pub mod server;
 pub mod status;
 
@@ -76,6 +80,7 @@ use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
 use endpoint::{Connections, Offer};
+use inbound::Inbound;
 use net::Endpoint;
 use net::http::Request;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
@@ -87,6 +92,8 @@ pub struct HttpTransport {
     h2c: bool,
     /// The connections kept to the endpoints this sends to.
     connections: Connections,
+    /// The listener a Receive Location keeps, and its callers' connections.
+    inbound: Inbound,
 }
 
 impl HttpTransport {
@@ -97,6 +104,7 @@ impl HttpTransport {
             timeout: None,
             h2c: false,
             connections: Connections::new(),
+            inbound: Inbound::new(),
         }
     }
 
@@ -148,10 +156,13 @@ impl Transport for HttpTransport {
         Directions::BOTH
     }
 
+    /// The next request from whichever caller sends first, on the
+    /// listener bound by the first receive and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-
-        Ok(vec![self.accept_one(&listener)?])
+        let arrived = self
+            .inbound
+            .next(|| self.bind(), self.timeout, server::arrival)?;
+        Ok(vec![arrived])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -278,6 +289,36 @@ mod tests {
         assert_eq!(arrived.bytes, b"<order/>");
         assert!(arrived.origin_uri.starts_with("http://127.0.0.1:"));
         assert!(arrived.origin_uri.ends_with("/orders"));
+    }
+
+    #[test]
+    fn every_receive_takes_from_one_kept_listener_and_one_kept_connection() {
+        // Until 2026-09-27 each receive bound a listener of its own and
+        // answered `Connection: close`, so a sender's second request found
+        // nothing listening at the address its first had reached.
+        const ROUNDS: usize = 10;
+        let receiver = HttpTransport::loopback();
+        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let target = format!("http://{address}/orders");
+        let sender = std::thread::spawn(move || {
+            let sender = HttpTransport::loopback();
+            for round in 0..ROUNDS {
+                sender
+                    .send(&target, &[u8::try_from(round).expect("small")])
+                    .expect("sent");
+            }
+            sender.connections.opened()
+        });
+        for round in 0..ROUNDS {
+            let arrived = receiver.receive().expect("received");
+            assert_eq!(arrived[0].bytes, [u8::try_from(round).expect("small")]);
+        }
+        assert_eq!(
+            sender.join().expect("sender"),
+            1,
+            "one connection for every send"
+        );
+        assert_eq!(receiver.inbound.open(), 1);
     }
 
     #[test]
