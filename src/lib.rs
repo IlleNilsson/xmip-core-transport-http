@@ -15,6 +15,9 @@
 //! status.rs     the judgement of an answer's status, for the
 //!               technologies that ride on HTTP
 //! date.rs       the moment a header carries: RFC 1123
+//! event_wire.rs
+//!               the event capability's webhook: a `WireEvent` posted as
+//!               the HTTP binding says, and read back off a request
 //! ```
 //!
 //! **HTTP/2 or HTTP/1.1, per connection.** A Send Location offers `h2`
@@ -54,6 +57,7 @@
 
 pub mod date;
 pub mod endpoint;
+pub mod event_wire;
 pub mod server;
 pub mod status;
 
@@ -61,6 +65,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use transport::Arrived;
+use transport::Configured;
 use transport::Directions;
 use transport::Transport;
 use transport::error::Result;
@@ -70,6 +75,7 @@ use transport::socket;
 
 use net::Endpoint;
 use net::http::Request;
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
 pub struct HttpTransport {
@@ -164,6 +170,43 @@ impl Transport for HttpTransport {
     }
 }
 
+impl Configured for HttpTransport {
+    /// The address is where a Receive Location listens; a Send Location
+    /// posts to the URL its target names.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "h2c",
+                kind: Kind::Boolean,
+                presence: Presence::Optional,
+                meaning: "Whether HTTP/2 is spoken to an http:// endpoint by prior knowledge; \
+                          HTTP/1.1 in the clear when left out.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a connection is waited for, accepted or opened, and how \
+                          long one that stops sending is waited on; unbounded when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let mut transport = Self::new(address);
+        if settings.optional_boolean("h2c") == Some(true) {
+            transport = transport.speaking_h2c();
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 impl HttpTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on the accept, the connect and the reads.
@@ -191,6 +234,23 @@ impl Loopback for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(HttpTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            ("h2c".to_string(), Given::Boolean(true)),
+            ("timeout".to_string(), Given::Text("3s".to_string())),
+        ];
+        let built = HttpTransport::open("0.0.0.0:8080", Applies::Send, &given).expect("built");
+        assert!(built.h2c);
+        assert_eq!(built.timeout, Some(Duration::from_secs(3)));
+        let Err(refused) = HttpTransport::open("0.0.0.0:8080", Applies::Receive, &given) else {
+            panic!("a Receive Location speaks no h2c of its own");
+        };
+        assert!(refused.message.contains("\"h2c\""), "{}", refused.message);
+    }
 
     #[test]
     fn http_round_trip_carries_the_body_and_the_path() {

@@ -55,7 +55,7 @@ mod tests {
     fn a_success_is_any_two_hundred_and_the_two_client_codes_that_mean_try_again_retry() {
         assert!(!retryable(200) && !retryable(299) && !retryable(404));
         assert!(retryable(503) && retryable(408) && retryable(429));
-        let code = |answer: &Response| answer.text();
+        let code = |answer: &Response| answer.text().expect("text").to_string();
         assert_eq!(
             judge("S3", Response::new(204), code, |_| false)
                 .expect("ok")
