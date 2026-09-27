@@ -24,28 +24,27 @@
 //! `Authorization`. A client certificate is the other way HTTP presents
 //! one, and waits on the estate's TLS offering a client identity.
 //!
-//! **One connection per Party, kept.** Over HTTP/1.1 the connection to a
-//! webhook stays open between events (`Connection: keep-alive`), so an
-//! event costs one exchange and not a connect — which on loopback is half
-//! of it. A webhook that answers `Connection: close` is connected to
-//! afresh next time; one that closed a kept connection meanwhile is
-//! connected to afresh at once, the event sent again: at least once. A
-//! webhook spoken to in HTTP/2 gets a connection per event.
+//! **Connected once, not per event.** The wire keeps its connections in
+//! the transport's [`Connections`]: over HTTP/1.1 the connection to a
+//! webhook stays open between events, and over HTTP/2 one connection
+//! carries event after event, so an event costs one exchange and not a
+//! connect — which on loopback is half of it. A webhook that answers
+//! `Connection: close` is connected to afresh next time; one that closed a
+//! kept connection meanwhile is connected to afresh at once, the event
+//! sent again: at least once.
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use event::binding::Carried;
 use event::forward::Wire;
 use net::Endpoint;
-use net::http::{Request, Response, Version, read_response, write_request};
+use net::http::Request;
 use resilience::Failure;
 use transport::error::Result;
 use xcore::PartyId;
 
-use crate::endpoint::{self, Connection};
+use crate::endpoint::{Connections, Offer};
 use crate::status;
 
 /// Where one Party's events are posted, and what is presented there.
@@ -85,9 +84,8 @@ impl Webhook {
 
     /// The request that carries `carried` here.
     fn request(&self, carried: &Carried) -> Request {
-        let mut request = Request::new("POST", self.endpoint.path())
-            .header("Host", &self.endpoint.authority())
-            .header("Connection", "keep-alive");
+        let mut request =
+            Request::new("POST", self.endpoint.path()).header("Host", &self.endpoint.authority());
         if let Some(media) = &carried.content_type {
             request = request.header("Content-Type", media);
         }
@@ -101,22 +99,22 @@ impl Webhook {
     }
 }
 
-/// The HTTP wire: each Party's webhook, and the HTTP/1.1 connection kept
-/// open to it.
+/// The HTTP wire: each Party's webhook, and the connections kept open to
+/// them.
 pub struct EventWire {
     webhooks: BTreeMap<PartyId, Webhook>,
     timeout: Option<Duration>,
-    kept: Mutex<BTreeMap<PartyId, Box<dyn Connection>>>,
+    connections: Connections,
 }
 
 impl EventWire {
     /// A wire configured for no Party yet.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             webhooks: BTreeMap::new(),
             timeout: None,
-            kept: Mutex::new(BTreeMap::new()),
+            connections: Connections::new(),
         }
     }
 
@@ -134,37 +132,6 @@ impl EventWire {
         self.timeout = Some(timeout);
         self
     }
-
-    /// `request` exchanged with `party`'s webhook: on the connection kept
-    /// to it where there is one, else on a new one, kept afterwards where
-    /// the webhook keeps it too.
-    fn exchange(&self, party: PartyId, webhook: &Webhook, request: &Request) -> Result<Response> {
-        if webhook.h2c {
-            return endpoint::exchange(&webhook.endpoint, self.timeout, true, request);
-        }
-        let kept = self.kept().remove(&party);
-        if let Some(Ok((answer, reusable))) = kept.map(|open| exchange_on(open, request)) {
-            self.keep(party, reusable);
-            return Ok(answer);
-        }
-        let (open, version) = endpoint::open(&webhook.endpoint, self.timeout, false)?;
-        if version == Version::Http2 {
-            return Ok(net::http2::exchange(open, "https", request)?);
-        }
-        let (answer, reusable) = exchange_on(open, request)?;
-        self.keep(party, reusable);
-        Ok(answer)
-    }
-
-    fn kept(&self) -> std::sync::MutexGuard<'_, BTreeMap<PartyId, Box<dyn Connection>>> {
-        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn keep(&self, party: PartyId, connection: Option<Box<dyn Connection>>) {
-        if let Some(connection) = connection {
-            self.kept().insert(party, connection);
-        }
-    }
 }
 
 impl Default for EventWire {
@@ -173,27 +140,18 @@ impl Default for EventWire {
     }
 }
 
-/// `request` on `connection` in HTTP/1.1, its answer, and the connection
-/// back where the answer did not close it.
-fn exchange_on(
-    mut connection: Box<dyn Connection>,
-    request: &Request,
-) -> Result<(Response, Option<Box<dyn Connection>>)> {
-    write_request(&mut connection, request)?;
-    let answer = read_response(&mut BufReader::new(&mut connection))?;
-    let closed = answer
-        .header_value("connection")
-        .is_some_and(|said| said.eq_ignore_ascii_case("close"));
-    Ok((answer, (!closed).then_some(connection)))
-}
-
 impl Wire for EventWire {
     /// One `POST` to the Party's webhook, a 2xx its acknowledgement.
     fn carry(&self, party: PartyId, carried: &Carried) -> std::result::Result<(), Failure> {
         let webhook = self.webhooks.get(&party).ok_or_else(|| {
             Failure::permanent(format!("no webhook is configured for Party {party}"))
         })?;
-        let answer = self.exchange(party, webhook, &webhook.request(carried))?;
+        let answer = self.connections.exchange(
+            &webhook.endpoint,
+            self.timeout,
+            Offer::agreed(webhook.h2c),
+            &webhook.request(carried),
+        )?;
         status::judge(
             "the webhook",
             answer,
@@ -224,6 +182,7 @@ pub fn carried(request: &Request) -> Carried {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use net::http::Response;
 
     #[test]
     fn a_carried_event_is_its_request_and_its_request_the_carried_event() {

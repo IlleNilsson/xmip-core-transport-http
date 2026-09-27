@@ -37,20 +37,40 @@ them, on 2026-09-24.
 ## HTTP/2 or HTTP/1.1, per connection
 
 Since 2026-09-25 the version is the connection's. `endpoint::open` offers
-`h2` and `http/1.1` by ALPN over TLS and reports what the server selected;
-in the clear it speaks HTTP/2 only where the Location says so —
-`HttpTransport::speaking_h2c`, prior knowledge, since RFC 9113 removed
-HTTP/1.1's `Upgrade` — and HTTP/1.1 otherwise. `endpoint::exchange` sends
-a request in whichever it is, through `net::http` or `net::http2`. A
-request served (`server::serve_one`, a Receive Location, the Loopback far
-end) is answered in HTTP/2 where the connection opens with its preface, and
-in HTTP/1.1 otherwise; the octets read to tell are read again.
-`server::answer_on` does the same on a connection already accepted, for a
-server that bounds its wait for a connection and its reads apart — the
-observe capability's Prometheus scrape endpoint, and its OTLP exporter
-sends with `endpoint::exchange`. The
-technologies riding on HTTP connect with `endpoint::connect`, which offers
-nothing, and keep speaking HTTP/1.1 unchanged. HTTP/3 is open problem 30.
+what its `Offer` says — `Http11`, nothing; `Agreed`, `h2` and `http/1.1`
+by ALPN over TLS; `PriorKnowledge`, HTTP/2 in the clear too — and reports
+what the server selected; in the clear it speaks HTTP/2 only where the
+Location says so — `HttpTransport::speaking_h2c`, prior knowledge, since
+RFC 9113 removed HTTP/1.1's `Upgrade` — and HTTP/1.1 otherwise. A request
+served (`server::serve_one`, a Receive Location, the Loopback far end) is
+answered in HTTP/2 where the connection opens with its preface, and in
+HTTP/1.1 otherwise; the octets read to tell are read again. A connection
+served for one request says so before its answer — `Connection: close`,
+or a `GOAWAY` ahead of the HTTP/2 answer — so a client that keeps
+connections lets it go. `server::answer_on` does the same on a connection
+already accepted, for a server that bounds its wait for a connection and
+its reads apart — the observe capability's Prometheus scrape endpoint.
+HTTP/3 is open problem 30.
+
+## Connected once, not per request
+
+`endpoint::Connections` keeps the connections a sender opened, per
+endpoint, and every request after the first goes on the connection already
+open: HTTP/1.1 kept alive — the request says no `Connection: close` — and
+one HTTP/2 connection carrying stream after stream. `HttpTransport`, the
+event wire, the observe capability's OTLP exporter and every technology
+riding on HTTP hold one; a technology's transport hands its own to every
+client it makes (`Client::sharing`), and the technologies offer `Http11`,
+speaking HTTP/1.1 under their signatures unchanged. A connection is taken
+for one request and put back after, so requests on several threads each
+have one. One the far end closed meanwhile fails on reuse, and the request
+goes again on a new connection: at least once. `Connections::opened` says
+how many were opened, and a test holds a hundred requests to one endpoint
+to one connection, in either version. Until 2026-09-27 every request
+connected, handshook TLS and said `Connection: close`, and every HTTP/2
+request opened a connection of its own. `endpoint::connect` remains for a
+session that holds its one connection itself: `WebDAV`'s, and a simulated
+service pushing to its subscriber.
 
 ## The event capability's webhook
 
@@ -59,15 +79,15 @@ Since 2026-09-26 this transport carries the event capability's wire events
 [xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`:
 it `POST`s what the event crate's HTTP binding wrote — structured or binary
 mode, the `ce-` headers already escaped there, once — to the webhook
-configured for the subscriber's Party, through `endpoint::open` and
-`net::http`, TLS through the estate's own for `https://`. A 2xx is the
+configured for the subscriber's Party, through `endpoint::Connections`,
+TLS through the estate's own for `https://`. A 2xx is the
 acknowledgement; 5xx, 408, 429 and a failed connection are retryable, any
 other 4xx permanent (`status::judge`), and the resilience guards decide each
 attempt: at least once. The identity presented is the bearer token
 configured for the Party (ADR-0019 clause 3); a client certificate waits on
-the estate's TLS offering a client identity. Over HTTP/1.1 the connection to
-a webhook is kept open between events, so an event costs one exchange rather
-than a connect. `event_wire::carried` is the read side: a request a
+the estate's TLS offering a client identity. The connection to a webhook is
+kept open between events, in either version, so an event costs one exchange
+rather than a connect. `event_wire::carried` is the read side: a request a
 receiving Xmip took, as the binding reads a `WireEvent` from.
 
 Near, very near real time: `tests/event_wire.rs` measures publish to the

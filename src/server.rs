@@ -100,6 +100,11 @@ pub fn answer_on<S: Read + Write, T>(
         let (id, request) = server
             .next_request()?
             .ok_or_else(|| protocol_error("an HTTP/2 connection that sent no request"))?;
+        // One request is all this connection carries, and the client is
+        // told before its answer: a client that keeps connections reads the
+        // GOAWAY on its way to the answer and lets this one go, rather than
+        // holding it open while the close below waits for it to.
+        server.go_away()?;
         let (report, response) = answer(&request);
         server.respond(id, &response)?;
         server.close();
@@ -159,7 +164,9 @@ mod tests {
         let request = Request::new("POST", at.path())
             .header("Host", &at.authority())
             .body(b"UNB");
-        let answer = endpoint::exchange(&at, timeout, true, &request).expect("answered");
+        let answer = endpoint::Connections::new()
+            .exchange(&at, timeout, endpoint::Offer::PriorKnowledge, &request)
+            .expect("answered");
         assert_eq!((answer.status, answer.body.as_slice()), (200, &b"UNB"[..]));
         assert_eq!(answer.trailer_value("grpc-status"), Some("0"));
         let host = far_end.join().expect("thread").expect("served");

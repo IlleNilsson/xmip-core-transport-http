@@ -1,5 +1,6 @@
-//! A connection to the endpoint a Location is configured with, and the
-//! version of HTTP it speaks.
+//! A connection to the endpoint a Location is configured with, the version
+//! of HTTP it speaks, and the connections a transport keeps between
+//! requests.
 //!
 //! The endpoint is read by `net::Endpoint` — `http://host:port` or
 //! `https://host:port` — and the connection it opens is what `net::http`
@@ -8,81 +9,200 @@
 //! (ADR-0033) — and without the feature an `https://` endpoint is refused
 //! with a message saying so rather than sent in the clear.
 //!
-//! **The version is the connection's.** Over TLS it is agreed by ALPN:
-//! [`open`] offers `h2` and `http/1.1`, and the server selects. Over
-//! cleartext HTTP/2 is spoken only by prior knowledge, where the Location
-//! says so (`h2c`); RFC 9113 removed HTTP/1.1's `Upgrade` to it, and there
-//! is none here. [`connect`] offers nothing and speaks HTTP/1.1, which is
-//! what the technologies riding on HTTP write with `net::http`.
+//! **The version is the connection's.** Over TLS it is agreed by ALPN
+//! where the caller offers ([`Offer`]): `h2` and `http/1.1`, and the server
+//! selects. Over cleartext HTTP/2 is spoken only by prior knowledge, where
+//! the Location says so (`h2c`); RFC 9113 removed HTTP/1.1's `Upgrade` to
+//! it, and there is none here.
+//!
+//! **Connected once, not per request.** [`Connections`] keeps what it
+//! opened, per endpoint, and every request after the first goes on the
+//! connection already open: HTTP/1.1 kept alive, one HTTP/2 connection
+//! carrying stream after stream. A transport holds one, and so does every
+//! client it makes. Until 2026-09-27 every request of every technology
+//! riding on HTTP connected, handshook TLS and said `Connection: close`,
+//! and every HTTP/2 request opened a connection of its own, preface and
+//! settings included.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use net::Endpoint;
 use net::http::{Request, Response, Version};
+use net::http2::Client;
 use transport::error::Result;
 use transport::socket;
 
 /// Anything a request can travel over: a plain socket, or one wrapped in
-/// TLS. Sendable, so a connection kept open between requests — the event
-/// capability's webhook keeps one per Party — can be held by whichever
-/// thread sends next.
+/// TLS. Sendable, so a connection kept open between requests can be held
+/// by whichever thread sends next.
 pub trait Connection: Read + Write + Send {}
 
 impl<S: Read + Write + Send> Connection for S {}
 
+/// Which versions of HTTP a connection is opened to speak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Offer {
+    /// HTTP/1.1 alone: nothing offered by ALPN. What a technology whose
+    /// service speaks HTTP/1.1 under its signature opens.
+    Http11,
+    /// HTTP/2 where TLS agrees it by ALPN, HTTP/1.1 otherwise and in the
+    /// clear.
+    Agreed,
+    /// As [`Offer::Agreed`], and HTTP/2 in the clear too, by prior
+    /// knowledge (`h2c`).
+    PriorKnowledge,
+}
+
+impl Offer {
+    /// [`Offer::PriorKnowledge`] where `h2c` says the service speaks HTTP/2
+    /// in the clear, [`Offer::Agreed`] otherwise.
+    #[must_use]
+    pub const fn agreed(h2c: bool) -> Self {
+        if h2c {
+            Self::PriorKnowledge
+        } else {
+            Self::Agreed
+        }
+    }
+}
+
 /// Open a connection to `endpoint` within `timeout`, with `timeout` on its
 /// reads, and guard it where the endpoint is `https://`: HTTP/1.1, which
-/// nothing is offered beside.
+/// nothing is offered beside. For a session that holds its one connection
+/// itself — `WebDAV`'s, a simulated service pushing to a subscriber.
 ///
 /// # Errors
 /// Where the endpoint could not be reached, or asks for TLS this build does
 /// not carry.
 pub fn connect(endpoint: &Endpoint, timeout: Option<Duration>) -> Result<Box<dyn Connection>> {
-    let tcp = socket::connect_tcp(&endpoint.address(), timeout)?;
-    if endpoint.secure() {
-        return Ok(secure(endpoint.host(), tcp, false)?.0);
-    }
-    Ok(Box::new(tcp))
+    Ok(open(endpoint, timeout, Offer::Http11)?.0)
 }
 
 /// Open a connection to `endpoint` as [`connect`] does, and the version it
-/// speaks: over TLS what ALPN agreed, offering HTTP/2 first; in the clear
-/// HTTP/2 where `h2c` says the service speaks it by prior knowledge, and
-/// HTTP/1.1 otherwise.
+/// speaks: over TLS what ALPN agreed of what `offer` offered; in the clear
+/// HTTP/2 where `offer` knows it beforehand, and HTTP/1.1 otherwise.
 ///
 /// # Errors
 /// As [`connect`], and where the handshake failed.
 pub fn open(
     endpoint: &Endpoint,
     timeout: Option<Duration>,
-    h2c: bool,
+    offer: Offer,
 ) -> Result<(Box<dyn Connection>, Version)> {
     let tcp = socket::connect_tcp(&endpoint.address(), timeout)?;
     if endpoint.secure() {
-        return secure(endpoint.host(), tcp, true);
+        return secure(endpoint.host(), tcp, offer != Offer::Http11);
     }
-    let version = if h2c { Version::Http2 } else { Version::Http11 };
+    let version = if offer == Offer::PriorKnowledge {
+        Version::Http2
+    } else {
+        Version::Http11
+    };
     Ok((Box::new(tcp), version))
 }
 
-/// Send `request` to `endpoint` on a connection of its own, in the version
-/// [`open`] finds the connection speaks, and read its answer.
+/// A connection kept open between requests, in the version it speaks.
+enum Kept {
+    Http11(Box<dyn Connection>),
+    Http2(Box<Client<Box<dyn Connection>>>),
+}
+
+/// Where kept connections are found: the endpoint's scheme and address,
+/// and what was offered when they were opened.
+type Key = (bool, String, Offer);
+
+/// The connections a transport keeps to the endpoints it sends to: opened
+/// on the first request to an endpoint and kept for the next, by the
+/// transport and every clone of it and every client it hands them to.
 ///
-/// # Errors
-/// As [`open`], and where the exchange failed.
-pub fn exchange(
-    endpoint: &Endpoint,
-    timeout: Option<Duration>,
-    h2c: bool,
-    request: &Request,
-) -> Result<Response> {
-    let (connection, version) = open(endpoint, timeout, h2c)?;
-    let scheme = if endpoint.secure() { "https" } else { "http" };
-    Ok(match version {
-        Version::Http11 => net::http::exchange(connection, request)?,
-        Version::Http2 => net::http2::exchange(connection, scheme, request)?,
+/// A connection is taken for one request and put back after, so requests
+/// on several threads each have one; nothing waits on another's answer. One
+/// the far end closed meanwhile — an idle timeout, a `GOAWAY`, a restart —
+/// fails on reuse, and the request goes again on a new connection: at
+/// least once, as every send in Xmip is. One whose answer says
+/// `Connection: close`, or ends with the connection, is not kept.
+#[derive(Clone, Default)]
+pub struct Connections {
+    kept: Arc<Mutex<BTreeMap<Key, Vec<Kept>>>>,
+    opened: Arc<AtomicUsize>,
+}
+
+impl Connections {
+    /// None kept yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Send `request` to `endpoint` on a connection kept to it, or on a new
+    /// one opened within `timeout` offering `offer`, and read its answer.
+    ///
+    /// # Errors
+    /// Where the endpoint could not be reached, the handshake failed, or the
+    /// exchange on a new connection failed.
+    pub fn exchange(
+        &self,
+        endpoint: &Endpoint,
+        timeout: Option<Duration>,
+        offer: Offer,
+        request: &Request,
+    ) -> Result<Response> {
+        let key = (endpoint.secure(), endpoint.address(), offer);
+        let reused = self.all().get_mut(&key).and_then(Vec::pop);
+        if let Some(Ok((answer, kept))) = reused.map(|kept| exchange_on(kept, request)) {
+            self.keep(key, kept);
+            return Ok(answer);
+        }
+        let (connection, version) = open(endpoint, timeout, offer)?;
+        self.opened.fetch_add(1, Ordering::Relaxed);
+        let fresh = match version {
+            Version::Http11 => Kept::Http11(connection),
+            Version::Http2 => {
+                let scheme = if endpoint.secure() { "https" } else { "http" };
+                Kept::Http2(Box::new(Client::handshake(connection, scheme)?))
+            }
+        };
+        let (answer, kept) = exchange_on(fresh, request)?;
+        self.keep(key, kept);
+        Ok(answer)
+    }
+
+    /// How many connections these have opened: one per endpoint while the
+    /// far end keeps them, however many requests.
+    #[must_use]
+    pub fn opened(&self) -> usize {
+        self.opened.load(Ordering::Relaxed)
+    }
+
+    fn all(&self) -> MutexGuard<'_, BTreeMap<Key, Vec<Kept>>> {
+        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn keep(&self, key: Key, kept: Option<Kept>) {
+        if let Some(kept) = kept {
+            self.all().entry(key).or_default().push(kept);
+        }
+    }
+}
+
+/// `request` on `kept`, its answer, and the connection back where it can
+/// carry the next.
+fn exchange_on(kept: Kept, request: &Request) -> Result<(Response, Option<Kept>)> {
+    Ok(match kept {
+        Kept::Http11(mut connection) => {
+            let (answer, reusable) = net::http::exchange_kept(&mut connection, request)?;
+            (answer, reusable.then_some(Kept::Http11(connection)))
+        }
+        Kept::Http2(mut client) => {
+            let answer = client.send(request)?;
+            let open = !client.going_away();
+            (answer, open.then_some(Kept::Http2(client)))
+        }
     })
 }
 
@@ -108,6 +228,8 @@ fn secure(_host: &str, tcp: TcpStream, _offer: bool) -> Result<(Box<dyn Connecti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufReader;
+    use std::net::TcpListener;
 
     #[test]
     fn an_https_endpoint_without_tls_says_so() {
@@ -126,13 +248,101 @@ mod tests {
         let (_listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
         let endpoint = Endpoint::parse(&format!("http://{address}")).expect("parsed");
         let timeout = Some(Duration::from_secs(2));
-        assert_eq!(
-            open(&endpoint, timeout, false).expect("open").1,
-            Version::Http11
-        );
-        assert_eq!(
-            open(&endpoint, timeout, true).expect("open").1,
-            Version::Http2
-        );
+        for (offer, version) in [
+            (Offer::Http11, Version::Http11),
+            (Offer::Agreed, Version::Http11),
+            (Offer::PriorKnowledge, Version::Http2),
+        ] {
+            assert_eq!(open(&endpoint, timeout, offer).expect("open").1, version);
+        }
+    }
+
+    /// A far end that keeps every connection it accepts and answers every
+    /// request on it, HTTP/1.1 or HTTP/2 as the connection opens: how many
+    /// connections it accepted, and how many requests it answered.
+    fn keeping(listener: &TcpListener, connections: usize) -> (usize, usize) {
+        let mut answered = 0;
+        for _ in 0..connections {
+            let (stream, _) = socket::accept_tcp(listener, None).expect("accept");
+            let (h2, first) = net::http2::sniff(&mut &stream).expect("sniffed");
+            let replayed = net::http2::Replayed::new(first, &stream);
+            if h2 {
+                // Served until the near end lets the connection go.
+                let _ = net::http2::serve(replayed, |_| {
+                    answered += 1;
+                    Response::new(204)
+                });
+                continue;
+            }
+            let mut reader = BufReader::new(replayed);
+            while let Ok(Some(_)) = net::http::read_request(&mut reader) {
+                let kept = Response::new(200).header("Connection", "keep-alive");
+                net::http::write_response(reader.get_mut(), &kept).expect("answered");
+                answered += 1;
+            }
+        }
+        (connections, answered)
+    }
+
+    #[test]
+    fn a_hundred_requests_to_one_endpoint_open_one_connection() {
+        const REQUESTS: usize = 100;
+        for offer in [Offer::Http11, Offer::PriorKnowledge] {
+            let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+            let far_end = std::thread::spawn(move || keeping(&listener, 1));
+            let endpoint = Endpoint::parse(&format!("http://{address}/orders")).expect("url");
+            let connections = Connections::new();
+            let shared = connections.clone();
+            let began = std::time::Instant::now();
+            for n in 0..REQUESTS {
+                let request = Request::new("POST", "/orders")
+                    .header("Host", &address)
+                    .body(n.to_string().as_bytes());
+                let by = if n % 2 == 0 { &connections } else { &shared };
+                let timeout = Some(Duration::from_secs(5));
+                let answer = by
+                    .exchange(&endpoint, timeout, offer, &request)
+                    .expect("answer");
+                assert!((200..300).contains(&answer.status), "{offer:?}");
+            }
+            // Generous for a debug build under load; a request that waited
+            // on a delayed acknowledgement took forty milliseconds on Linux.
+            let took = began.elapsed();
+            assert!(took < Duration::from_millis(5 * 100), "{offer:?}: {took:?}");
+            assert_eq!(connections.opened(), 1, "{offer:?}");
+            drop((connections, shared));
+            assert_eq!(far_end.join().expect("far end"), (1, REQUESTS), "{offer:?}");
+        }
+    }
+
+    #[test]
+    fn a_connection_the_far_end_closed_is_replaced_and_the_request_sent_again() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        // Says it keeps each connection, then closes it after one answer.
+        let far_end = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut reader = BufReader::new(&stream);
+                let request = net::http::read_request(&mut reader)
+                    .expect("read")
+                    .expect("one");
+                let kept = Response::new(202).header("Connection", "keep-alive");
+                net::http::write_response(&mut &stream, &kept.body(&request.body)).expect("w");
+            }
+        });
+        let endpoint = Endpoint::parse(&format!("http://{address}/hook")).expect("url");
+        let connections = Connections::new();
+        for body in [&b"one"[..], b"two"] {
+            let request = Request::new("POST", "/hook")
+                .header("Host", &address)
+                .body(body);
+            let timeout = Some(Duration::from_secs(5));
+            let answer = connections
+                .exchange(&endpoint, timeout, Offer::Http11, &request)
+                .expect("answered");
+            assert_eq!(answer.body, body);
+        }
+        assert_eq!(connections.opened(), 2);
+        far_end.join().expect("far end");
     }
 }
