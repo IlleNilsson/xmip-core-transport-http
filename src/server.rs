@@ -8,7 +8,7 @@
 //! is the connection accepted within its timeout, what a Receive Location
 //! answers, and the Stream that arrived.
 
-use std::io::BufReader;
+use std::io::{BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
@@ -74,7 +74,25 @@ fn take_one<T>(
     // The wait for the connection is bounded as well as the reads. This did
     // a bare accept until 2026-09-21, so a far end whose near end never
     // connected waited for good, and a hang has no verdict.
-    let (mut stream, peer) = socket::accept_tcp(listener, timeout)?;
+    let (stream, peer) = socket::accept_tcp(listener, timeout)?;
+    Ok((answer_on(stream, answer)?, peer))
+}
+
+/// Read the one request a connection already accepted carries, in the
+/// version it opens with, answer it as `answer` says, and report what
+/// `answer` made of it.
+///
+/// For a server whose wait for a connection and whose reads are bounded
+/// apart: a scrape endpoint waits for its scraper as long as it runs, and
+/// bounds each read (`xmip-core-observe-prometheus`). The connection's own
+/// timeouts are the caller's.
+///
+/// # Errors
+/// Where the connection broke, sent nothing, or sent a malformed request.
+pub fn answer_on<S: Read + Write, T>(
+    mut stream: S,
+    answer: impl FnOnce(&Request) -> (T, Response),
+) -> Result<T> {
     let (h2, first) = sniff(&mut stream)?;
     let mut connection = Replayed::new(first, stream);
     if h2 {
@@ -85,13 +103,13 @@ fn take_one<T>(
         let (report, response) = answer(&request);
         server.respond(id, &response)?;
         server.close();
-        return Ok((report, peer));
+        return Ok(report);
     }
     let request = read_request(&mut BufReader::new(&mut connection))?
         .ok_or_else(|| protocol_error("a connection that sent no request"))?;
     let (report, response) = answer(&request);
     write_response(&mut connection, &response)?;
-    Ok((report, peer))
+    Ok(report)
 }
 
 #[cfg(test)]

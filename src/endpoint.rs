@@ -25,10 +25,12 @@ use transport::error::Result;
 use transport::socket;
 
 /// Anything a request can travel over: a plain socket, or one wrapped in
-/// TLS.
-pub trait Connection: Read + Write {}
+/// TLS. Sendable, so a connection kept open between requests — the event
+/// capability's webhook keeps one per Party — can be held by whichever
+/// thread sends next.
+pub trait Connection: Read + Write + Send {}
 
-impl<S: Read + Write> Connection for S {}
+impl<S: Read + Write + Send> Connection for S {}
 
 /// Open a connection to `endpoint` within `timeout`, with `timeout` on its
 /// reads, and guard it where the endpoint is `https://`: HTTP/1.1, which

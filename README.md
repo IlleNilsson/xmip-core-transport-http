@@ -44,9 +44,36 @@ HTTP/1.1's `Upgrade` — and HTTP/1.1 otherwise. `endpoint::exchange` sends
 a request in whichever it is, through `net::http` or `net::http2`. A
 request served (`server::serve_one`, a Receive Location, the Loopback far
 end) is answered in HTTP/2 where the connection opens with its preface, and
-in HTTP/1.1 otherwise; the octets read to tell are read again. The
+in HTTP/1.1 otherwise; the octets read to tell are read again.
+`server::answer_on` does the same on a connection already accepted, for a
+server that bounds its wait for a connection and its reads apart — the
+observe capability's Prometheus scrape endpoint, and its OTLP exporter
+sends with `endpoint::exchange`. The
 technologies riding on HTTP connect with `endpoint::connect`, which offers
 nothing, and keep speaking HTTP/1.1 unchanged. HTTP/3 is open problem 30.
+
+## The event capability's webhook
+
+Since 2026-09-26 this transport carries the event capability's wire events
+(ADR-0065 clause 3). `event_wire::EventWire` implements
+[xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`:
+it `POST`s what the event crate's HTTP binding wrote — structured or binary
+mode, the `ce-` headers already escaped there, once — to the webhook
+configured for the subscriber's Party, through `endpoint::open` and
+`net::http`, TLS through the estate's own for `https://`. A 2xx is the
+acknowledgement; 5xx, 408, 429 and a failed connection are retryable, any
+other 4xx permanent (`status::judge`), and the resilience guards decide each
+attempt: at least once. The identity presented is the bearer token
+configured for the Party (ADR-0019 clause 3); a client certificate waits on
+the estate's TLS offering a client identity. Over HTTP/1.1 the connection to
+a webhook is kept open between events, so an event costs one exchange rather
+than a connect. `event_wire::carried` is the read side: a request a
+receiving Xmip took, as the binding reads a `WireEvent` from.
+
+Near, very near real time: `tests/event_wire.rs` measures publish to the
+webhook's receipt over 300 Events and holds the median to a millisecond and
+the 99th percentile to five, each beside a plain loopback TCP wake measured
+under the same load.
 
 ## Toolchain
 
