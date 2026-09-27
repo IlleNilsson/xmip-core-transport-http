@@ -45,17 +45,33 @@ RFC 9113 removed HTTP/1.1's `Upgrade` — and HTTP/1.1 otherwise. A request
 served (`server::serve_one`, a Receive Location, the Loopback far end) is
 answered in HTTP/2 where the connection opens with its preface, and in
 HTTP/1.1 otherwise; the octets read to tell are read again. A connection
-served for one request says so before its answer — `Connection: close`,
-or a `GOAWAY` ahead of the HTTP/2 answer — so a client that keeps
-connections lets it go. `server::answer_on` does the same on a connection
+served for one request — a far end, `server::serve_one` — says so before
+its answer — `Connection: close`, or a `GOAWAY` ahead of the HTTP/2
+answer — so a client that keeps connections lets it go.
+`server::serve_one_from` hands the answer the peer it serves, which AS2's
+and AS4's origins name. `server::answer_on` does the same on a connection
 already accepted, for a server that bounds its wait for a connection and
 its reads apart — the observe capability's Prometheus scrape endpoint.
 HTTP/3 is open problem 30.
 
+A Receive Location keeps what it serves on (`inbound::Inbound`, since
+2026-09-27): its listener, bound on the first receive, and the
+connections its callers keep, on the capability's `serving::Serving`.
+Each receive takes the next request from whichever caller sends first —
+HTTP/1.1 answered `Connection: keep-alive` unless the request said
+`close`, HTTP/2 stream after stream on one connection, a pipelined
+request taken from the buffer it was read into. Until then every receive
+bound a listener of its own and answered one request with `Connection:
+close`, so a sender's kept connection was used once and a request that
+came between two receives was refused. AS2, AS4, Peppol, MSMQ, SNS's
+subscription and Event Grid's webhook receive through it, each handing in
+what it answers.
+
 ## Connected once, not per request
 
 `endpoint::Connections` keeps the connections a sender opened, per
-endpoint, and every request after the first goes on the connection already
+endpoint — the transport capability's one session pool (`transport::Pool`),
+holding HTTP connections — and every request after the first goes on the connection already
 open: HTTP/1.1 kept alive — the request says no `Connection: close` — and
 one HTTP/2 connection carrying stream after stream. `HttpTransport`, the
 event wire, the observe capability's OTLP exporter and every technology
