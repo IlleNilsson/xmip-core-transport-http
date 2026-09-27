@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! endpoint.rs   a connection to an `http://` or `https://` endpoint, TLS
-//!               behind the `tls` feature, and the version it speaks
+//!               behind the `tls` feature, the version it speaks, and the
+//!               connections a sender keeps between requests
 //! server.rs     taking one request off a connection, HTTP/2 or HTTP/1.1,
 //!               and serving one to a technology's session
 //! status.rs     the judgement of an answer's status, for the
@@ -26,9 +27,10 @@
 //! ([`HttpTransport::speaking_h2c`], prior knowledge — RFC 9113 removed
 //! the `Upgrade`), and HTTP/1.1 otherwise. A Receive Location, and the
 //! Loopback far end, serve either: a connection that opens with HTTP/2's
-//! preface is answered in HTTP/2. The technologies riding on HTTP connect
-//! with [`endpoint::connect`], which offers nothing, and speak HTTP/1.1
-//! through `net::http` unchanged.
+//! preface is answered in HTTP/2. The technologies riding on HTTP send
+//! through [`endpoint::Connections`] offering HTTP/1.1 alone, and speak it
+//! through `net::http` unchanged. Every sender keeps its connections
+//! between requests: one per endpoint while the far end keeps it.
 //!
 //! The request and its answer, both halves, and the exchange of one for
 //! the other are `net::http`'s and `net::http2`'s, and the URL a Location
@@ -73,6 +75,7 @@ use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
+use endpoint::{Connections, Offer};
 use net::Endpoint;
 use net::http::Request;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
@@ -82,6 +85,8 @@ pub struct HttpTransport {
     bind: String,
     timeout: Option<Duration>,
     h2c: bool,
+    /// The connections kept to the endpoints this sends to.
+    connections: Connections,
 }
 
 impl HttpTransport {
@@ -91,6 +96,7 @@ impl HttpTransport {
             bind: bind.into(),
             timeout: None,
             h2c: false,
+            connections: Connections::new(),
         }
     }
 
@@ -158,7 +164,10 @@ impl Transport for HttpTransport {
         // The connect is bounded as well as the reads. This was a bare
         // connect until 2026-09-21, which waits on the operating system's
         // schedule, and longer still on a machine out of ephemeral ports.
-        let answer = endpoint::exchange(&endpoint, self.timeout, self.h2c, &request)?;
+        let offer = Offer::agreed(self.h2c);
+        let answer = self
+            .connections
+            .exchange(&endpoint, self.timeout, offer, &request)?;
 
         status::judge(
             "the server",
