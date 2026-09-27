@@ -33,7 +33,7 @@ const ACCEPTED: u16 = 202;
 /// # Errors
 ///
 /// Where nothing connected within `timeout`, the connection failed, the
-/// request was malformed, or the body was larger than `net::http::MAX_BODY`.
+/// request was malformed, or the body was larger than `net::MAX_BODY`.
 pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
     let ((target, bytes), peer) = take_one(listener, timeout, |request| {
         (
