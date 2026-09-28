@@ -18,7 +18,6 @@
 //!               answered request after request
 //! status.rs     the judgement of an answer's status, for the
 //!               technologies that ride on HTTP
-//! date.rs       the moment a header carries: RFC 1123
 //! event_wire.rs
 //!               the event capability's webhook: a `WireEvent` posted as
 //!               the HTTP binding says, and read back off a request
@@ -46,7 +45,8 @@
 //!
 //! `message` and `endpoint` moved here from the object-store transports on
 //! 2026-09-09, where each had carried an identical copy; the header dates
-//! and the judgement followed on 2026-09-14. A technology that rides on
+//! and the judgement followed on 2026-09-14. The date left on 2026-09-28
+//! for `net::http::date`, below every crate that writes a header. A technology that rides on
 //! HTTP shares HTTP's helpers through the http technology, never by copying
 //! a sibling's file and never by importing a sibling (ADR-0044).
 //! Percent-encoding came with them and left on 2026-09-24 for
@@ -60,7 +60,6 @@
 //! on the owner's ruling of 2026-09-22 for `xmip-core-transport-aws` and
 //! `xmip-core-transport-azure`, which ride on this crate.
 
-pub mod date;
 pub mod endpoint;
 pub mod event_wire;
 pub mod inbound;

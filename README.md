@@ -14,10 +14,11 @@ line — left it on 2026-09-25 for `net::head` in
 This crate holds what is the HTTP transport's own: the connection to an
 endpoint, HTTPS through
 [xmip-core-library-tls](https://github.com/IlleNilsson/xmip-core-library-tls),
-a request taken off a connection and answered, RFC 1123's date and the
-judgement of a status, which the technologies riding on HTTP share
+a request taken off a connection and answered, and the judgement of a
+status, which the technologies riding on HTTP share
 (ADR-0044). The request and its answer — both halves, read by length,
-chunks or the end — and the URL a Location names are `net::http` and
+chunks or the end — the RFC 1123 date a header carries, and the URL a
+Location names are `net::http` and
 `net::Endpoint` in
 [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net)
 since 2026-09-25: one HTTP/1.1 codec, which the technologies riding on HTTP

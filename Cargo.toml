@@ -25,9 +25,6 @@ transport = { package = "xmip-core-transport", git = "https://github.com/IlleNil
 # all, which this crate carried until 2026-09-23 where no other transport
 # could reach it.
 tls = { package = "xmip-core-library-tls", git = "https://github.com/IlleNilsson/xmip-core-library-tls", branch = "main", optional = true }
-# The estate's encoding primitives: the civil calendar a date header is
-# written from.
-codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 # The URL a Location names (`net::Endpoint`) and HTTP/1.1 on the wire
 # (`net::http`): the one codec this transport and every technology riding
 # on it exchange a request for its answer with.
