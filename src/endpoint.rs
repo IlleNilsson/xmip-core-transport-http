@@ -32,6 +32,7 @@ use net::Endpoint;
 use net::http::{Request, Response, Version};
 use net::http2::Client;
 use transport::error::Result;
+use transport::pool::{alive, quiet};
 use transport::socket;
 use transport::{Pool, Pooled};
 
@@ -78,7 +79,19 @@ impl Offer {
 /// Where the endpoint could not be reached, or asks for TLS this build does
 /// not carry.
 pub fn connect(endpoint: &Endpoint, timeout: Option<Duration>) -> Result<Box<dyn Connection>> {
-    Ok(open(endpoint, timeout, Offer::Http11)?.0)
+    Ok(open(endpoint, timeout, Offer::Http11)?.connection)
+}
+
+/// A connection just opened: what a request travels over, the version it
+/// speaks, and the socket beneath it, whose far end a kept connection is
+/// asked after.
+pub struct Opened {
+    /// The plain socket, or the socket in TLS.
+    pub connection: Box<dyn Connection>,
+    /// What the connection speaks.
+    pub version: Version,
+    /// The socket beneath, TLS or not.
+    pub socket: TcpStream,
 }
 
 /// Open a connection to `endpoint` as [`connect`] does, and the version it
@@ -87,25 +100,34 @@ pub fn connect(endpoint: &Endpoint, timeout: Option<Duration>) -> Result<Box<dyn
 ///
 /// # Errors
 /// As [`connect`], and where the handshake failed.
-pub fn open(
-    endpoint: &Endpoint,
-    timeout: Option<Duration>,
-    offer: Offer,
-) -> Result<(Box<dyn Connection>, Version)> {
+pub fn open(endpoint: &Endpoint, timeout: Option<Duration>, offer: Offer) -> Result<Opened> {
     let tcp = socket::connect_tcp(&endpoint.address(), timeout)?;
-    if endpoint.secure() {
-        return secure(endpoint.host(), tcp, offer != Offer::Http11);
-    }
-    let version = if offer == Offer::PriorKnowledge {
-        Version::Http2
+    let socket = tcp
+        .try_clone()
+        .map_err(|e| transport::error::classify("keeping the socket", &e))?;
+    let (connection, version) = if endpoint.secure() {
+        secure(endpoint.host(), tcp, offer != Offer::Http11)?
+    } else if offer == Offer::PriorKnowledge {
+        (Box::new(tcp) as Box<dyn Connection>, Version::Http2)
     } else {
-        Version::Http11
+        (Box::new(tcp) as Box<dyn Connection>, Version::Http11)
     };
-    Ok((Box::new(tcp), version))
+    Ok(Opened {
+        connection,
+        version,
+        socket,
+    })
 }
 
-/// A connection kept open between requests, in the version it speaks.
-enum Kept {
+/// A connection kept open between requests, in the version it speaks, and
+/// the socket beneath it.
+struct Kept {
+    speaking: Speaking,
+    socket: TcpStream,
+}
+
+/// What a kept connection speaks.
+enum Speaking {
     /// HTTP/1.1, and whether its last answer left it open for the next.
     Http11 {
         connection: Box<dyn Connection>,
@@ -116,11 +138,13 @@ enum Kept {
 
 impl Pooled for Kept {
     /// Not where the last answer said `Connection: close` or ended with the
-    /// connection, nor where the server said `GOAWAY`.
+    /// connection, nor where the server said `GOAWAY`, nor where the server
+    /// has closed the socket meanwhile. An HTTP/1.1 server speaks only when
+    /// asked, so anything it sent to an idle connection lets it go too.
     fn usable(&mut self) -> bool {
-        match self {
-            Self::Http11 { open, .. } => *open,
-            Self::Http2(client) => !client.going_away(),
+        match &self.speaking {
+            Speaking::Http11 { open, .. } => *open && quiet(&self.socket),
+            Speaking::Http2(client) => !client.going_away() && alive(&self.socket),
         }
     }
 }
@@ -179,28 +203,33 @@ impl Connections {
 
 /// A new connection to `endpoint`, handshaken where it speaks HTTP/2.
 fn kept(endpoint: &Endpoint, timeout: Option<Duration>, offer: Offer) -> Result<Kept> {
-    let (connection, version) = open(endpoint, timeout, offer)?;
-    Ok(match version {
-        Version::Http11 => Kept::Http11 {
+    let Opened {
+        connection,
+        version,
+        socket,
+    } = open(endpoint, timeout, offer)?;
+    let speaking = match version {
+        Version::Http11 => Speaking::Http11 {
             connection,
             open: true,
         },
         Version::Http2 => {
             let scheme = if endpoint.secure() { "https" } else { "http" };
-            Kept::Http2(Box::new(Client::handshake(connection, scheme)?))
+            Speaking::Http2(Box::new(Client::handshake(connection, scheme)?))
         }
-    })
+    };
+    Ok(Kept { speaking, socket })
 }
 
 /// `request` on `kept`, and its answer.
 fn exchange_on(kept: &mut Kept, request: &Request) -> Result<Response> {
-    Ok(match kept {
-        Kept::Http11 { connection, open } => {
+    Ok(match &mut kept.speaking {
+        Speaking::Http11 { connection, open } => {
             let (answer, reusable) = net::http::exchange_kept(connection, request)?;
             *open = reusable;
             answer
         }
-        Kept::Http2(client) => client.send(request)?,
+        Speaking::Http2(client) => client.send(request)?,
     })
 }
 
@@ -251,7 +280,10 @@ mod tests {
             (Offer::Agreed, Version::Http11),
             (Offer::PriorKnowledge, Version::Http2),
         ] {
-            assert_eq!(open(&endpoint, timeout, offer).expect("open").1, version);
+            assert_eq!(
+                open(&endpoint, timeout, offer).expect("open").version,
+                version
+            );
         }
     }
 
@@ -310,6 +342,53 @@ mod tests {
             assert_eq!(connections.opened(), 1, "{offer:?}");
             drop((connections, shared));
             assert_eq!(far_end.join().expect("far end"), (1, REQUESTS), "{offer:?}");
+        }
+    }
+
+    #[test]
+    fn connections_to_far_ends_that_hung_up_are_closed_not_kept() {
+        // The Playground, 2026-09-29: a WebDAV far end at a new port every
+        // round answered its PUT and hung up, and the kept connection to it
+        // was never asked for again — a socket in CLOSE_WAIT a round. A kept
+        // connection is closed when this side's socket is: the far end then
+        // reads the end of the stream.
+        const ROUNDS: usize = 30;
+        let connections = Connections::new();
+        let mut far_ends = Vec::new();
+        for round in 0..ROUNDS {
+            let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+            let far_end = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut reader = BufReader::new(&stream);
+                net::http::read_request(&mut reader)
+                    .expect("read")
+                    .expect("one");
+                let kept = Response::new(201).header("Connection", "keep-alive");
+                net::http::write_response(&mut &stream, &kept).expect("answered");
+                stream.shutdown(std::net::Shutdown::Write).expect("hung up");
+                stream
+            });
+            let endpoint = Endpoint::parse(&format!("http://{address}/dav")).expect("url");
+            let request = Request::new("PUT", "/dav")
+                .header("Host", &address)
+                .body(b"x");
+            let timeout = Some(Duration::from_secs(5));
+            let answer = connections
+                .exchange(&endpoint, timeout, Offer::Http11, &request)
+                .expect("answered");
+            assert_eq!(answer.status, 201, "round {round}");
+            far_ends.push(far_end.join().expect("far end"));
+        }
+        // The last round or two may not have seen their hang-up yet.
+        for (round, mut stream) in far_ends.into_iter().take(ROUNDS - 2).enumerate() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("timeout");
+            let read = stream.read(&mut [0u8; 1]);
+            assert!(
+                matches!(read, Ok(0)),
+                "round {round}: still kept ({read:?})"
+            );
         }
     }
 
