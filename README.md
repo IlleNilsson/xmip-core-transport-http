@@ -81,7 +81,13 @@ client it makes (`Client::sharing`), and the technologies offer `Http11`,
 speaking HTTP/1.1 under their signatures unchanged. A connection is taken
 for one request and put back after, so requests on several threads each
 have one. One the far end closed meanwhile fails on reuse, and the request
-goes again on a new connection: at least once. `Connections::opened` says
+goes again on a new connection: at least once. A kept connection holds
+the socket beneath it, TLS or not, and is let go once the server has
+closed it or, over HTTP/1.1, sent anything to it while it was idle
+(`transport::pool::quiet`); the pool closes those before it opens another,
+so a server gone for good holds no socket here. Until 2026-09-29 a
+connection to a WebDAV far end at a new port every round was kept in
+`CLOSE_WAIT` for good. `Connections::opened` says
 how many were opened, and a test holds a hundred requests to one endpoint
 to one connection, in either version. Until 2026-09-27 every request
 connected, handshook TLS and said `Connection: close`, and every HTTP/2
