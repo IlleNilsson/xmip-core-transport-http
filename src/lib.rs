@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn https_without_the_tls_feature_says_so_rather_than_sending_in_the_clear() {
         // The failure that matters. Silently downgrading to http would put a
-        // partner's data on the wire unencrypted because a build flag was
+        // Party's data on the wire unencrypted because a build flag was
         // missing.
         let receiver = HttpTransport::new("127.0.0.1:0");
         let (_listener, address) = receiver.bind().expect("binding");
