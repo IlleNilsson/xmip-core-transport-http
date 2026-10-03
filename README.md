@@ -68,6 +68,35 @@ came between two receives was refused. AS2, AS4, Peppol, MSMQ, SNS's
 subscription and Event Grid's webhook receive through it, each handing in
 what it answers.
 
+## The caller waits for the verdict
+
+A request carrying a Stream is answered only after the runtime's whole
+receive cycle (runtime-model section 5): `inbound::Inbound::next` hands back
+what the technology heard and an `inbound::Reply`, which goes into the
+arrival's acknowledgement (`Reply::acknowledgement`). The cycle ends in one
+of three verdicts, and `HttpTransport` answers each by its status
+(`server::status`, `server::verdict`), RFC 9110 section 15:
+
+| Verdict | Status | The caller |
+| --- | --- | --- |
+| Accepted | `202 Accepted` | is done: the Stream is in Xmip's custody |
+| Refused, Unidentified | `401 Unauthorized` | does not send it again unchanged |
+| Refused, Forbidden | `403 Forbidden` | does not send it again unchanged |
+| Refused, Unacceptable | `422 Unprocessable Content` | does not send it again unchanged |
+| Failed | `503 Service Unavailable` | keeps the Stream and sends it again |
+
+`202`, not `200`: Xmip has taken the Stream into custody and promised
+nothing else. A technology riding on HTTP answers its own — an MDN, a
+receipt — and takes these statuses where its protocol answers in HTTP's. The reply holds the connection for its answer
+(`transport::answer::Answer`). Until the answer is written the connection is
+busy (`transport::answer::Busy`, `serving::Open::busy`): it takes no next
+request. A reply dropped unanswered shuts the connection, so a caller is
+never left waiting. A
+request that carries no Stream — a handshake, a refusal of what is not the
+protocol's message — is answered at once (`inbound::Heard::Answered`). The
+request body is read whole by `net::http`, within `net::MAX_BODY`, and
+handed to the runtime as a reader over it.
+
 ## Connected once, not per request
 
 `endpoint::Connections` keeps the connections a sender opened, per
