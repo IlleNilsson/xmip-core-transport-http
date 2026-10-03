@@ -14,41 +14,77 @@ use std::time::Duration;
 
 use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
-use transport::Arrived;
 use transport::error::{Result, protocol_error};
 use transport::socket;
+use transport::{Refusal, Taken, Verdict};
 
-/// What Xmip answers a caller.
+/// What Xmip answers a caller whose Stream the receive cycle accepted.
 ///
 /// `202 Accepted`, deliberately. Xmip has taken the Stream into custody and has
 /// promised nothing else — which is exactly the state a Stream is in once the
-/// arrival gate has passed and before the Journey exists. `200 OK` would claim
-/// the work is done.
-const ACCEPTED: u16 = 202;
+/// receive cycle has written it to the Ledger and before the Journey exists.
+/// `200 OK` would claim the work is done.
+pub const ACCEPTED: u16 = 202;
+
+/// What Xmip answers a caller whose receive cycle Xmip could not complete:
+/// `503 Service Unavailable` (RFC 9110 section 15.6.4), a transient
+/// condition, so the caller keeps the Stream and sends it again — nothing
+/// was taken into custody.
+pub const FAILED: u16 = 503;
+
+/// What Xmip answers a caller whose Stream the receive cycle refused, by
+/// why: a client error the caller does not repeat unchanged (RFC 9110
+/// section 15.5). `401 Unauthorized` where the caller could not be
+/// identified (section 15.5.2), `403 Forbidden` where it is known and not
+/// permitted (section 15.5.4), `422 Unprocessable Content` where the
+/// content was refused — its routing property unreadable, or it failed
+/// Validation (section 15.5.21).
+#[must_use]
+pub const fn refused(why: Refusal) -> u16 {
+    match why {
+        Refusal::Unidentified => 401,
+        Refusal::Forbidden => 403,
+        Refusal::Unacceptable => 422,
+    }
+}
+
+/// The status a verdict is: [`ACCEPTED`], [`refused`] by why, or
+/// [`FAILED`].
+#[must_use]
+pub const fn status(verdict: Verdict) -> u16 {
+    match verdict {
+        Verdict::Accepted => ACCEPTED,
+        Verdict::Refused(why) => refused(why),
+        Verdict::Failed => FAILED,
+    }
+}
+
+/// The answer a verdict is, with no body: its [`status`].
+#[must_use]
+pub fn verdict(verdict: Verdict) -> Response {
+    Response::new(status(verdict))
+}
+
+/// Where a request came from: `http://<peer><target>`.
+#[must_use]
+pub fn origin(request: &Request, peer: SocketAddr) -> String {
+    format!("http://{peer}{}", request.target())
+}
 
 /// Accept one request within `timeout`, with `timeout` on its reads, and
-/// answer it. `None` waits forever, which is what a listening Receive
-/// Location does.
+/// answer it `202` as it is taken: what the Loopback far end does.
 ///
 /// # Errors
 ///
 /// Where nothing connected within `timeout`, the connection failed, the
 /// request was malformed, or the body was larger than `net::MAX_BODY`.
-pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Arrived> {
-    serve_one_from(listener, timeout, arrival)
-}
-
-/// A request taken into custody as the Stream it carries, from `peer`, and
-/// the `202 Accepted` that says so: what a Receive Location answers, on a
-/// connection stood up for one request or one its caller keeps
-/// ([`crate::inbound`]).
-#[must_use]
-pub fn arrival(request: &Request, peer: SocketAddr) -> (Arrived, Response) {
-    let origin = format!("http://{peer}{}", request.target());
-    (
-        Arrived::new(origin, request.body.clone()),
-        Response::new(ACCEPTED),
-    )
+pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Taken> {
+    serve_one_from(listener, timeout, |request, peer| {
+        (
+            Taken::new(origin(request, peer), request.body.clone()),
+            Response::new(ACCEPTED),
+        )
+    })
 }
 
 /// Accept one connection on `listener`, with `timeout` on its reads, read

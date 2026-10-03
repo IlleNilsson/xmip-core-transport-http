@@ -72,6 +72,7 @@ use std::time::Duration;
 use transport::Arrived;
 use transport::Configured;
 use transport::Directions;
+use transport::Taken;
 use transport::Transport;
 use transport::error::Result;
 use transport::listening::Listening;
@@ -79,7 +80,7 @@ use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 
 use endpoint::{Connections, Offer};
-use inbound::Inbound;
+use inbound::{Heard, Inbound};
 use net::Endpoint;
 use net::http::Request;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
@@ -141,7 +142,7 @@ impl HttpTransport {
     /// # Errors
     ///
     /// As [`server::accept_one`].
-    pub fn accept_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    pub fn accept_one(&self, listener: &TcpListener) -> Result<Taken> {
         server::accept_one(listener, self.timeout)
     }
 }
@@ -155,13 +156,32 @@ impl Transport for HttpTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered(
+            "each request is its own, and a connection waiting for its answer takes no next request",
+        )
+    }
+
     /// The next request from whichever caller sends first, on the
-    /// listener bound by the first receive and kept.
+    /// listener bound by the first receive and kept. The caller waits for
+    /// the verdict (`server::status`): `202 Accepted` once the receive
+    /// cycle accepted the body; `401`, `403` or `422` where it refused it,
+    /// by why, so the caller does not send it again unchanged; `503 Service
+    /// Unavailable` where Xmip could not complete the cycle, so the caller
+    /// sends it again. The body is read whole, within `net::MAX_BODY`.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let arrived = self
-            .inbound
-            .next(|| self.bind(), self.timeout, server::arrival)?;
-        Ok(vec![arrived])
+        let ((origin, body), reply) = self.inbound.next(
+            || self.bind(),
+            self.timeout,
+            |request, peer| Heard::Waiting((server::origin(&request, peer), request.body)),
+        )?;
+        let reply =
+            reply.ok_or_else(|| transport::error::protocol_error("a request answered unheard"))?;
+        Ok(vec![Arrived::whole(
+            origin,
+            body,
+            reply.acknowledgement(server::verdict),
+        )])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -309,8 +329,9 @@ mod tests {
             sender.connections.opened()
         });
         for round in 0..ROUNDS {
-            let arrived = receiver.receive().expect("received");
-            assert_eq!(arrived[0].bytes, [u8::try_from(round).expect("small")]);
+            let arrived = receiver.receive().expect("received").remove(0);
+            let taken = arrived.taken().expect("accepted");
+            assert_eq!(taken.bytes, [u8::try_from(round).expect("small")]);
         }
         assert_eq!(
             sender.join().expect("sender"),
@@ -318,6 +339,66 @@ mod tests {
             "one connection for every send"
         );
         assert_eq!(receiver.inbound.open(), 1);
+    }
+
+    #[test]
+    fn a_failed_cycle_answers_503_a_refused_one_4xx_by_why_and_an_accepted_one_202() {
+        use transport::Refusal;
+        let receiver = HttpTransport::loopback();
+        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let caller = std::thread::spawn(move || {
+            let connections = Connections::new();
+            let request = Request::new("POST", at.path())
+                .header("Host", &at.authority())
+                .body(b"order");
+            [0; 5].map(|_| {
+                connections
+                    .exchange(&at, Some(LOOPBACK_TIMEOUT), Offer::Http11, &request)
+                    .expect("answered")
+                    .status
+            })
+        });
+        let failed = receiver.receive().expect("received").remove(0);
+        assert!(failed.defers());
+        failed.failed().expect("failed");
+        for why in [
+            Refusal::Unidentified,
+            Refusal::Forbidden,
+            Refusal::Unacceptable,
+        ] {
+            let refused = receiver.receive().expect("sent again").remove(0);
+            refused.refused(why).expect("refused");
+        }
+        let again = receiver.receive().expect("sent again").remove(0);
+        assert_eq!(again.taken().expect("accepted").bytes, b"order");
+        assert_eq!(caller.join().expect("caller"), [503, 401, 403, 422, 202]);
+    }
+
+    #[test]
+    fn a_request_answered_after_its_verdict_takes_under_a_millisecond() {
+        // The owner's rule, held: around a payload, Xmip's own work is
+        // under a millisecond — the caller waiting for the verdict, the
+        // reply kept beside its connection and written after, included.
+        const ROUNDS: u32 = 500;
+        let receiver = HttpTransport::loopback();
+        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let target = format!("http://{address}/orders");
+        let sender = std::thread::spawn(move || {
+            let sender = HttpTransport::loopback();
+            for _ in 0..ROUNDS {
+                sender.send(&target, b"x").expect("sent");
+            }
+        });
+        let began = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            let arrived = receiver.receive().expect("received").remove(0);
+            arrived.taken().expect("accepted");
+        }
+        let each = began.elapsed() / ROUNDS;
+        sender.join().expect("sender");
+        println!("an HTTP request received, accepted and answered: {each:?} each");
+        assert!(each < Duration::from_millis(1), "{each:?} each");
     }
 
     #[test]
