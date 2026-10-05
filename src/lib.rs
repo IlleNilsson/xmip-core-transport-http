@@ -85,6 +85,27 @@ use net::Endpoint;
 use net::http::Request;
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
+/// The header a keyed send carries its deduplication key in
+/// (draft-ietf-httpapi-idempotency-key-header).
+pub const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
+
+/// `key` as the header's value: a Structured Field string (RFC 8941
+/// section 3.3.3), quoted, with `"` and `\` escaped. The Journey id a send
+/// is keyed by is a UUID and needs neither.
+#[must_use]
+pub fn idempotency_key(key: &str) -> String {
+    let mut value = String::with_capacity(key.len() + 2);
+    value.push('"');
+    for character in key.chars() {
+        if matches!(character, '"' | '\\') {
+            value.push('\\');
+        }
+        value.push(character);
+    }
+    value.push('"');
+    value
+}
+
 #[derive(Clone)]
 pub struct HttpTransport {
     bind: String,
@@ -185,11 +206,30 @@ impl Transport for HttpTransport {
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+        self.post(target, bytes, None)
+    }
+
+    /// The key goes in the `Idempotency-Key` header
+    /// (draft-ietf-httpapi-idempotency-key-header), as its Structured
+    /// Field string: a server that honors the header answers a repeated
+    /// POST with the first one's outcome rather than acting twice.
+    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
+        self.post(target, bytes, Some(key))
+    }
+}
+
+impl HttpTransport {
+    /// The one send: `bytes` posted to `target`, under `key` where there
+    /// is one.
+    fn post(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
         let endpoint = Endpoint::parse(target)?;
-        let request = Request::new("POST", endpoint.path())
+        let mut request = Request::new("POST", endpoint.path())
             .header("Host", &endpoint.authority())
-            .header("Content-Type", "application/octet-stream")
-            .body(bytes);
+            .header("Content-Type", "application/octet-stream");
+        if let Some(key) = key {
+            request = request.header(IDEMPOTENCY_KEY, &idempotency_key(key));
+        }
+        let request = request.body(bytes);
 
         // The connect is bounded as well as the reads. This was a bare
         // connect until 2026-09-21, which waits on the operating system's
