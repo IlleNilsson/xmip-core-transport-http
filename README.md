@@ -147,6 +147,10 @@ webhook's receipt over 300 Events and holds the median to a millisecond and
 the 99th percentile to five, each beside a plain loopback TCP wake measured
 under the same load.
 
+## The deduplication key
+
+A keyed send (`Transport::send_keyed`, built 2026-10-04) carries the Journey's identifier in the `Idempotency-Key` header of draft-ietf-httpapi-idempotency-key-header, written as the Structured Field string it defines: `Idempotency-Key: "<key>"` (`IDEMPOTENCY_KEY`, `idempotency_key`). Every attempt of one Journey carries the same key, so a server that honors the header answers a repeated POST with the first one's outcome rather than act on it twice; a server that does not ignores it. An unkeyed `send` carries no such header.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
