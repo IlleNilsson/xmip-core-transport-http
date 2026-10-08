@@ -16,7 +16,9 @@ use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
 use transport::error::{Result, protocol_error};
 use transport::socket;
-use transport::{Refusal, Taken, Verdict};
+use transport::{Acknowledgement, ArrivalIdentity, Arrived, Headers, Refusal, Taken, Verdict};
+
+use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI};
 
 /// What Xmip answers a caller whose Stream the receive cycle accepted.
 ///
@@ -71,6 +73,75 @@ pub fn origin(request: &Request, peer: SocketAddr) -> String {
     format!("http://{peer}{}", request.target())
 }
 
+/// One request as it arrived from `peer`, its far end told by
+/// `acknowledgement`: the body whole, the request's headers as HTTP's
+/// ([`Headers`]), and what the request says of its sender for the identity
+/// gates — the peer, the method, the target and each query parameter, under
+/// `context::property`'s names (ADR-0019 clause 5, amendment 2026-09-24).
+/// Every technology that takes a Stream as an HTTP request builds its
+/// arrival here, or through [`Sender`] where its body is not the request's.
+#[must_use]
+pub fn arrived(request: Request, peer: SocketAddr, acknowledgement: Acknowledgement) -> Arrived {
+    let origin = origin(&request, peer);
+    let sender = Sender::of(&request, peer);
+    sender.on(Arrived::whole(origin, request.body, acknowledgement))
+}
+
+/// What one request from `peer` says of its sender: its headers, HTTP's,
+/// and its peer, method, target and query under `context::property`'s
+/// names. Read off the request once, and put on the arrival a technology
+/// riding on HTTP builds from it — AS2 and AS4, whose Stream is the entity
+/// the request carries, not its body.
+#[derive(Clone, Debug)]
+pub struct Sender {
+    headers: Headers,
+    observed: Vec<(String, String)>,
+}
+
+/// What every arrival from an HTTP request carries of its sender before any
+/// header does: its peer and its request line ([`Sender`]).
+pub const REQUEST: ArrivalIdentity =
+    ArrivalIdentity::Named(&[context::property::PEER_ADDRESS, HTTP_METHOD, HTTP_URI]);
+
+impl Sender {
+    /// What `request`, from `peer`, says of who sent it.
+    #[must_use]
+    pub fn of(request: &Request, peer: SocketAddr) -> Self {
+        let (address, at) = transport::arrival_identity::peer(peer);
+        let mut observed = vec![
+            (address, at),
+            (HTTP_METHOD.to_string(), request.method.clone()),
+            (HTTP_URI.to_string(), request.target()),
+        ];
+        observed.extend(
+            request
+                .query
+                .iter()
+                .map(|(name, value)| (format!("{HTTP_QUERY_PREFIX}{name}"), value.clone())),
+        );
+        Self {
+            headers: Headers::of("http").text(request.headers.iter().cloned()),
+            observed,
+        }
+    }
+
+    /// What a far end took whole, carrying what the request said of its
+    /// sender: what a loopback round holds it to.
+    #[must_use]
+    pub fn taken(self, mut taken: Taken) -> Taken {
+        taken.observed.extend(self.observed);
+        taken
+    }
+
+    /// `arrived`, carrying what the request said of its sender.
+    #[must_use]
+    pub fn on(self, arrived: Arrived) -> Arrived {
+        arrived
+            .with_headers(self.headers)
+            .observing_all(self.observed)
+    }
+}
+
 /// Accept one request within `timeout`, with `timeout` on its reads, and
 /// answer it `202` as it is taken: what the Loopback far end does.
 ///
@@ -80,11 +151,12 @@ pub fn origin(request: &Request, peer: SocketAddr) -> String {
 /// request was malformed, or the body was larger than `net::MAX_BODY`.
 pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Taken> {
     serve_one_from(listener, timeout, |request, peer| {
+        let at_once = Acknowledgement::at_most_once("answered 202 as it is taken");
         (
-            Taken::new(origin(request, peer), request.body.clone()),
+            arrived(request.clone(), peer, at_once).taken(),
             Response::new(ACCEPTED),
         )
-    })
+    })?
 }
 
 /// Accept one connection on `listener`, with `timeout` on its reads, read

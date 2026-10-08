@@ -69,6 +69,7 @@ pub mod status;
 use std::net::TcpListener;
 use std::time::Duration;
 
+use transport::ArrivalIdentity;
 use transport::Arrived;
 use transport::Configured;
 use transport::Directions;
@@ -83,6 +84,7 @@ use endpoint::{Connections, Offer};
 use inbound::{Heard, Inbound};
 use net::Endpoint;
 use net::http::Request;
+
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The header a keyed send carries its deduplication key in
@@ -191,16 +193,16 @@ impl Transport for HttpTransport {
     /// Unavailable` where Xmip could not complete the cycle, so the caller
     /// sends it again. The body is read whole, within `net::MAX_BODY`.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let ((origin, body), reply) = self.inbound.next(
+        let ((request, peer), reply) = self.inbound.next(
             || self.bind(),
             self.timeout,
-            |request, peer| Heard::Waiting((server::origin(&request, peer), request.body)),
+            |request, peer| Heard::Waiting((request, peer)),
         )?;
         let reply =
             reply.ok_or_else(|| transport::error::protocol_error("a request answered unheard"))?;
-        Ok(vec![Arrived::whole(
-            origin,
-            body,
+        Ok(vec![server::arrived(
+            request,
+            peer,
             reply.acknowledgement(server::verdict),
         )])
     }
@@ -296,6 +298,12 @@ impl HttpTransport {
 }
 
 impl Loopback for HttpTransport {
+    /// The peer, and the request line: what every request says of its
+    /// sender before any header does (`server::arrived`).
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        server::REQUEST
+    }
+
     /// A bound listener waiting for its one request.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let transport = self.clone();
@@ -379,6 +387,55 @@ mod tests {
             "one connection for every send"
         );
         assert_eq!(receiver.inbound.open(), 1);
+    }
+
+    #[test]
+    fn a_received_request_carries_its_peer_method_target_query_and_headers() {
+        use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI, PEER_ADDRESS};
+        let receiver = HttpTransport::loopback();
+        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let caller = std::thread::spawn(move || {
+            let request = Request::new("POST", at.path())
+                .query("tenant", "c1")
+                .header("Host", &at.authority())
+                .header("Authorization", "Bearer t-1")
+                .body(b"order");
+            Connections::new()
+                .exchange(&at, Some(LOOPBACK_TIMEOUT), Offer::Http11, &request)
+                .expect("answered")
+                .status
+        });
+        let mut arrived = receiver.receive().expect("received").remove(0);
+        let observed: Vec<(&str, &str)> = arrived
+            .observed()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let peer = observed.iter().find(|(name, _)| *name == PEER_ADDRESS);
+        assert!(
+            peer.is_some_and(|(_, at)| at.starts_with("127.0.0.1:")),
+            "{observed:?}"
+        );
+        assert!(observed.contains(&(HTTP_METHOD, "POST")), "{observed:?}");
+        assert!(
+            observed.contains(&(HTTP_URI, "/orders?tenant=c1")),
+            "{observed:?}"
+        );
+        let tenant = format!("{HTTP_QUERY_PREFIX}tenant");
+        assert!(observed.contains(&(tenant.as_str(), "c1")), "{observed:?}");
+        let headers = arrived.take_headers();
+        assert_eq!(headers.protocol(), "http");
+        assert!(
+            headers
+                .fields()
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+                    && *value == xcore::ScalarValue::Text("Bearer t-1".into())),
+            "{headers:?}"
+        );
+        arrived.taken().expect("accepted");
+        assert_eq!(caller.join().expect("caller"), 202);
     }
 
     #[test]
@@ -483,5 +540,16 @@ mod tests {
 
         assert!(failure.message.contains("tls"));
         assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn a_round_hands_the_arrival_who_sent_it() {
+        // `Loopback::round` holds the far end's arrival to what
+        // `arrival_identity` says it carries.
+        let taken = HttpTransport::loopback()
+            .round(b"who sent this")
+            .expect("a round");
+        assert_eq!(taken.bytes, b"who sent this");
+        assert!(!taken.observed.is_empty(), "{taken:?}");
     }
 }

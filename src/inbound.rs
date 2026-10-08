@@ -53,6 +53,17 @@ pub enum Heard<T> {
     Waiting(T),
 }
 
+impl<T> Heard<T> {
+    /// The same answer or wait, carrying `f` of what was heard: what a
+    /// technology riding on HTTP adds to it — who sent the request.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Heard<U> {
+        match self {
+            Self::Answered(heard, answer) => Heard::Answered(f(heard), answer),
+            Self::Waiting(heard) => Heard::Waiting(f(heard)),
+        }
+    }
+}
+
 impl Inbound {
     /// Nothing bound, nothing open.
     #[must_use]
