@@ -185,6 +185,10 @@ impl Transport for HttpTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the listener waits for a request")
+    }
+
     /// The next request from whichever caller sends first, on the
     /// listener bound by the first receive and kept. The caller waits for
     /// the verdict (`server::status`): `202 Accepted` once the receive
