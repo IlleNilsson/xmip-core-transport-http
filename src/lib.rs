@@ -196,7 +196,7 @@ impl Transport for HttpTransport {
     /// by why, so the caller does not send it again unchanged; `503 Service
     /// Unavailable` where Xmip could not complete the cycle, so the caller
     /// sends it again. The body is read whole, within `net::MAX_BODY`.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let ((request, peer), reply) = self.inbound.next(
             || self.bind(),
             self.timeout,
@@ -211,16 +211,19 @@ impl Transport for HttpTransport {
         )])
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.post(target, bytes, None)
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered(
+            "the HTTP client writes a request whole, its length counted from it",
+        )
     }
 
     /// The key goes in the `Idempotency-Key` header
     /// (draft-ietf-httpapi-idempotency-key-header), as its Structured
     /// Field string: a server that honors the header answers a repeated
     /// POST with the first one's outcome rather than acting twice.
-    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
-        self.post(target, bytes, Some(key))
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
+        self.post(target, bytes, outgoing.key())
     }
 }
 
