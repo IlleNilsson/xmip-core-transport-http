@@ -36,9 +36,11 @@ fn a_keyed_send_carries_the_journey_id_as_its_idempotency_key_on_every_attempt()
     let heard = hearing(listener, 3);
     let target = format!("http://{address}/orders");
     let sender = HttpTransport::loopback();
-    sender.send_keyed(&target, b"order", KEY).expect("sent");
     sender
-        .send_keyed(&target, b"order", KEY)
+        .send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))
+        .expect("sent");
+    sender
+        .send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))
         .expect("sent again");
     sender.send(&target, b"order").expect("sent unkeyed");
     let quoted = format!("\"{KEY}\"");
