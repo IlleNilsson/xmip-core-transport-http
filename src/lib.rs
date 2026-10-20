@@ -16,7 +16,7 @@
 //! inbound.rs    what a Receive Location keeps between receives: its
 //!               listener, and the connections its callers keep open,
 //!               answered request after request
-//! status.rs     the judgement of an answer's status, for the
+//! status.rs     the judgment of an answer's status, for the
 //!               technologies that ride on HTTP
 //! event_wire.rs
 //!               the event capability's webhook: a `WireEvent` posted as
@@ -45,7 +45,7 @@
 //!
 //! `message` and `endpoint` moved here from the object-store transports on
 //! 2026-09-09, where each had carried an identical copy; the header dates
-//! and the judgement followed on 2026-09-14. The date left on 2026-09-28
+//! and the judgment followed on 2026-09-14. The date left on 2026-09-28
 //! for `net::http::date`, below every crate that writes a header. A technology that rides on
 //! HTTP shares HTTP's helpers through the http technology, never by copying
 //! a sibling's file and never by importing a sibling (ADR-0044).

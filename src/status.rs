@@ -1,4 +1,4 @@
-//! The judgement of an answer's status: a success as it is, a failure
+//! The judgment of an answer's status: a success as it is, a failure
 //! retryable where the status says come back.
 //!
 //! The message itself — writing a request, reading its answer — is
