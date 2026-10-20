@@ -14,7 +14,7 @@ line — left it on 2026-09-25 for `net::head` in
 This crate holds what is the HTTP transport's own: the connection to an
 endpoint, HTTPS through
 [xmip-core-library-tls](https://github.com/IlleNilsson/xmip-core-library-tls),
-a request taken off a connection and answered, and the judgement of a
+a request taken off a connection and answered, and the judgment of a
 status, which the technologies riding on HTTP share
 (ADR-0044). The request and its answer — both halves, read by length,
 chunks or the end — the RFC 1123 date a header carries, and the URL a
