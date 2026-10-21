@@ -234,8 +234,8 @@ impl Open for Caller {
         }
     }
 
-    fn busy(&self) -> bool {
-        self.busy.is_busy()
+    fn busy(&self) -> Option<&Busy> {
+        Some(&self.busy)
     }
 }
 

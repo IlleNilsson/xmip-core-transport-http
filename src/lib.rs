@@ -160,6 +160,17 @@ impl HttpTransport {
         socket::bind_tcp(&self.bind)
     }
 
+    /// Bind the listener every receive takes from now, where no receive
+    /// has, and say where it is: for a far end a sender reaches before it
+    /// receives, which keeps every connection the sender makes.
+    ///
+    /// # Errors
+    ///
+    /// As [`HttpTransport::bind`].
+    pub fn listening(&self) -> Result<&str> {
+        self.inbound.bound(|| self.bind())
+    }
+
     /// Take one request from an already-bound listener and answer it.
     ///
     /// # Errors
@@ -181,7 +192,8 @@ impl Transport for HttpTransport {
 
     fn arrivals(&self) -> transport::Arrivals {
         transport::Arrivals::Unordered(
-            "each request is its own, and a connection waiting for its answer takes no next request",
+            "each request is its own, and a connection waiting for its answer takes no next \
+             request",
         )
     }
 
@@ -372,7 +384,7 @@ mod tests {
         // nothing listening at the address its first had reached.
         const ROUNDS: usize = 10;
         let receiver = HttpTransport::loopback();
-        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.listening().expect("bound");
         let target = format!("http://{address}/orders");
         let sender = std::thread::spawn(move || {
             let sender = HttpTransport::loopback();
@@ -400,7 +412,7 @@ mod tests {
     fn a_received_request_carries_its_peer_method_target_query_and_headers() {
         use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI, PEER_ADDRESS};
         let receiver = HttpTransport::loopback();
-        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.listening().expect("bound");
         let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
         let caller = std::thread::spawn(move || {
             let request = Request::new("POST", at.path())
@@ -449,7 +461,7 @@ mod tests {
     fn a_failed_cycle_answers_503_a_refused_one_4xx_by_why_and_an_accepted_one_202() {
         use transport::Refusal;
         let receiver = HttpTransport::loopback();
-        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.listening().expect("bound");
         let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
         let caller = std::thread::spawn(move || {
             let connections = Connections::new();
@@ -486,7 +498,7 @@ mod tests {
         // reply kept beside its connection and written after, included.
         const ROUNDS: u32 = 500;
         let receiver = HttpTransport::loopback();
-        let address = receiver.inbound.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.listening().expect("bound");
         let target = format!("http://{address}/orders");
         let sender = std::thread::spawn(move || {
             let sender = HttpTransport::loopback();
