@@ -52,7 +52,7 @@
 //! Percent-encoding came with them and left on 2026-09-24 for
 //! `xmip-core-library-net`, beside the authority, where the identifier and
 //! the form shape that also write it reach it; a technology riding on HTTP
-//! calls `net::percent` directly.
+//! calls `codec::percent` directly.
 //!
 //! What one vendor speaks over HTTP is that vendor's, not HTTP's: Signature
 //! Version 4 and the AWS Query API, and Azure's Shared Access Signature and
