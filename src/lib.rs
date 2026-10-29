@@ -82,8 +82,8 @@ use transport::socket;
 
 use endpoint::{Connections, Offer};
 use inbound::{Heard, Inbound};
-use net::Endpoint;
 use net::http::Request;
+use net::{Endpoint, Target};
 
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
@@ -111,6 +111,8 @@ pub fn idempotency_key(key: &str) -> String {
 #[derive(Clone)]
 pub struct HttpTransport {
     bind: String,
+    /// Whether the address a Location was entered with is `https://`.
+    secure: bool,
     timeout: Option<Duration>,
     h2c: bool,
     /// The connections kept to the endpoints this sends to.
@@ -124,6 +126,7 @@ impl HttpTransport {
     pub fn new(bind: impl Into<String>) -> Self {
         Self {
             bind: bind.into(),
+            secure: false,
             timeout: None,
             h2c: false,
             connections: Connections::new(),
@@ -157,7 +160,22 @@ impl HttpTransport {
     ///
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
+        if self.secure {
+            return Err(transport::TransportError::permanent(format!(
+                "https://{} would listen in TLS, which an HTTP Receive Location does not \
+                 terminate yet: enter it as http://",
+                self.bind
+            )));
+        }
         socket::bind_tcp(&self.bind)
+    }
+
+    /// Whether the address asked for TLS, `https://`: a send's comes from
+    /// the URL it posts to, a receive's is refused as it binds.
+    #[must_use]
+    const fn secure(mut self, secure: bool) -> Self {
+        self.secure = secure;
+        self
     }
 
     /// Bind the listener every receive takes from now, where no receive
@@ -295,8 +313,27 @@ impl Configured for HttpTransport {
         ],
     };
 
+    const SCHEMES: &'static [&'static str] = &["http", "https"];
+
+    /// The whole address: a Send Location's is the URL it posts to, and a
+    /// Receive Location's scheme says whether it would listen in TLS.
+    fn own_terms(address: &str) -> &str {
+        address
+    }
+
+    /// A Receive Location listens at the address's authority, the scheme's
+    /// port where it names none; `https://` asks for TLS, which a receive
+    /// does not terminate yet ([`HttpTransport::bind`]).
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        let mut transport = Self::new(address);
+        let named = Target::under(Self::SCHEMES, address);
+        let mut transport = match named {
+            Some(named) => {
+                let secure = named.is(&["https"]);
+                let port = if secure { 443 } else { 80 };
+                Self::new(net::authority::with_default_port(named.authority(), port)).secure(secure)
+            }
+            None => Self::new(address),
+        };
         if settings.optional_boolean("h2c") == Some(true) {
             transport = transport.speaking_h2c();
         }
@@ -356,6 +393,19 @@ mod tests {
             panic!("a Receive Location speaks no h2c of its own");
         };
         assert!(refused.message.contains("\"h2c\""), "{}", refused.message);
+    }
+
+    #[test]
+    fn an_address_listens_at_its_authority_and_https_says_tls() {
+        let plain = HttpTransport::open("http://127.0.0.1:0", Applies::Receive, &[]).expect("http");
+        assert_eq!(plain.bind, "127.0.0.1:0");
+        plain.bind().expect("listens");
+        let named = HttpTransport::open("HTTP://party-x.example", Applies::Receive, &[]);
+        assert_eq!(named.expect("http").bind, "party-x.example:80");
+        let secure =
+            HttpTransport::open("https://127.0.0.1:0", Applies::Receive, &[]).expect("https");
+        let refused = secure.bind().expect_err("no TLS termination yet");
+        assert!(refused.message.contains("https://127.0.0.1:0"), "{refused}");
     }
 
     #[test]
