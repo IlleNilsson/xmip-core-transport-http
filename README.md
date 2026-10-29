@@ -160,3 +160,7 @@ here.
 
 The included workflow is manual-only and calls the versioned shared workflow at
 `IlleNilsson/.github@v1`.
+
+## The address alone
+
+A Location is entered by its address (ADR-0064, amendment 2026-10-28): `http://` or `https://`, the scheme choosing this technology. A Send Location posts to the URL; `https://` brings TLS. A Receive Location listens at the address's authority, port 80 where it names none; `https://` would listen in TLS, which an HTTP receive does not terminate yet, so it is refused as it binds, in words saying to enter it as `http://`.
