@@ -60,6 +60,7 @@
 //! on the owner's ruling of 2026-09-22 for `xmip-core-transport-aws` and
 //! `xmip-core-transport-azure`, which ride on this crate.
 
+pub mod basic;
 pub mod endpoint;
 pub mod event_wire;
 pub mod inbound;
@@ -86,6 +87,9 @@ use net::http::Request;
 use net::{Endpoint, Target};
 
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+
+/// The schemes an HTTP Location's address is entered with.
+pub const SCHEMES: &[&str] = &["http", "https"];
 
 /// The header a keyed send carries its deduplication key in
 /// (draft-ietf-httpapi-idempotency-key-header).
@@ -119,6 +123,10 @@ pub struct HttpTransport {
     connections: Connections,
     /// The listener a Receive Location keeps, and its callers' connections.
     inbound: Inbound,
+    /// The secret a Send Location names, read at each request: a password
+    /// sent as HTTP Basic authentication (RFC 7617) for the address's user
+    /// (ADR-0019, amendment 2026-10-29).
+    secret: Option<transport::Secured>,
 }
 
 impl HttpTransport {
@@ -131,6 +139,7 @@ impl HttpTransport {
             h2c: false,
             connections: Connections::new(),
             inbound: Inbound::new(),
+            secret: None,
         }
     }
 
@@ -268,6 +277,9 @@ impl HttpTransport {
         if let Some(key) = key {
             request = request.header(IDEMPOTENCY_KEY, &idempotency_key(key));
         }
+        if let Some(basic) = basic::basic(self.secret.as_ref(), target)? {
+            request = request.header("Authorization", &basic);
+        }
         let request = request.body(bytes);
 
         // The connect is bounded as well as the reads. This was a bare
@@ -313,7 +325,7 @@ impl Configured for HttpTransport {
         ],
     };
 
-    const SCHEMES: &'static [&'static str] = &["http", "https"];
+    const SCHEMES: &'static [&'static str] = SCHEMES;
 
     /// The whole address: a Send Location's is the URL it posts to, and a
     /// Receive Location's scheme says whether it would listen in TLS.
@@ -341,6 +353,14 @@ impl Configured for HttpTransport {
             transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
+    }
+
+    /// The password a Send Location's secret holds, sent with each request
+    /// as HTTP Basic for the address's user, `https://user@host/path`. A
+    /// Receive Location presents nothing: it is the one connected to.
+    fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
+        self.secret = Some(secret);
+        Ok(self)
     }
 }
 
@@ -609,6 +629,37 @@ mod tests {
 
         assert!(failure.message.contains("tls"));
         assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn a_send_presents_its_locations_password_as_basic_authentication() {
+        use transport::secured::Kept;
+        let kept = std::sync::Arc::new(Kept::default());
+        let password = Kept::drawn();
+        kept.set("partner-x.http", xcore::SecretKind::Password, &password);
+        let receiver = HttpTransport::loopback();
+        let address = receiver.listening().expect("bound").to_string();
+        let sender = HttpTransport::loopback()
+            .secured_by(kept.secured("partner-x.http"))
+            .expect("kept");
+        let posting = std::thread::spawn(move || {
+            sender.send(&format!("http://orders@{address}/in"), b"order")
+        });
+        let mut arrived = receiver.receive().expect("received").remove(0);
+        let headers = arrived.take_headers();
+        let pair = format!("orders:{password}");
+        let expected = format!("Basic {}", codec::base64::encode(pair.as_bytes()));
+        assert!(
+            headers.fields().iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    && *value == xcore::ScalarValue::Text(expected.clone())
+            }),
+            "no Basic authorization for orders"
+        );
+        // Not answered: the sender is told the connection closed, which
+        // this test does not ask about.
+        drop(arrived);
+        let _ = posting.join().expect("thread");
     }
 
     #[test]
