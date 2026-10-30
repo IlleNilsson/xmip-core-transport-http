@@ -149,7 +149,7 @@ under the same load.
 
 ## The deduplication key
 
-A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier in the `Idempotency-Key` header of draft-ietf-httpapi-idempotency-key-header, written as the Structured Field string it defines: `Idempotency-Key: "<key>"` (`IDEMPOTENCY_KEY`, `idempotency_key`). Every attempt of one Journey carries the same key, so a server that honors the header answers a repeated POST with the first one's outcome rather than act on it twice; a server that does not ignores it. An unkeyed `send` carries no such header.
+A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier in the `Idempotency-Key` header of draft-ietf-httpapi-idempotency-key-header, written as the Structured Field string it defines: `Idempotency-Key: "<key>"` (`IDEMPOTENCY_KEY`, `idempotency_key`). Every attempt on one Journey carries the same key, so a server that honors the header answers a repeated POST with the first one's outcome rather than act on it twice; a server that does not ignores it. An unkeyed `send` carries no such header.
 
 ## Toolchain
 

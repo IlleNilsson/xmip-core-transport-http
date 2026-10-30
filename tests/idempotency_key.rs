@@ -1,6 +1,6 @@
 //! A keyed send carries its deduplication key in the `Idempotency-Key`
 //! header (draft-ietf-httpapi-idempotency-key-header), the same on every
-//! attempt of one Journey; an unkeyed send carries none.
+//! attempt on one Journey; an unkeyed send carries none.
 
 use std::net::TcpListener;
 use std::thread;
