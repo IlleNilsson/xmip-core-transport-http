@@ -15,8 +15,6 @@
 //!   millisecond (the shared webhook is `tests/event_wire/fixture.rs`).
 
 use std::fs;
-use std::io::BufReader;
-use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +22,7 @@ use std::time::{Duration, Instant};
 use event::binding::{Binding, Mode};
 use event::forward::Forwarder;
 use net::Endpoint;
-use net::http::{Request, Response};
+use net::http::Request;
 use resilience::Guard;
 use retry::Retry;
 use transport::Transport;
@@ -34,39 +32,13 @@ use xcore::latency::{spin, spread};
 use xcore::processor_time::ProcessorTime;
 use xmip_core_transport_http::HttpTransport;
 use xmip_core_transport_http::endpoint::{Connections, Offer};
+use xmip_core_transport_http::fixture::keeping;
 
 #[allow(dead_code)]
 #[path = "../event_wire/fixture.rs"]
 mod fixture;
 
 use fixture::{allowing, audit_at, far_end, published, subscribed, wire};
-
-/// A far end that keeps every connection it accepts and answers every
-/// request on it, HTTP/1.1 or HTTP/2 as the connection opens: how many
-/// connections it accepted, and how many requests it answered.
-fn keeping(listener: &TcpListener, connections: usize) -> (usize, usize) {
-    let mut answered = 0;
-    for _ in 0..connections {
-        let (stream, _) = socket::accept_tcp(listener, None).expect("accept");
-        let (h2, first) = net::http2::sniff(&mut &stream).expect("sniffed");
-        let replayed = net::http2::Replayed::new(first, &stream);
-        if h2 {
-            // Served until the near end lets the connection go.
-            let _ = net::http2::serve(replayed, |_| {
-                answered += 1;
-                Response::new(204)
-            });
-            continue;
-        }
-        let mut reader = BufReader::new(replayed);
-        while let Ok(Some(_)) = net::http::read_request(&mut reader) {
-            let kept = Response::new(200).header("Connection", "keep-alive");
-            net::http::write_response(reader.get_mut(), &kept).expect("answered");
-            answered += 1;
-        }
-    }
-    (connections, answered)
-}
 
 #[test]
 fn a_hundred_requests_on_one_connection_take_five_milliseconds_each_at_most() {

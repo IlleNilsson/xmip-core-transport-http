@@ -146,7 +146,9 @@ Near, very near real time: the module's timing program, `tests/measured`
 (run alone, after the rest), measures publish to the
 webhook's receipt over 300 Events and holds the median to a millisecond and
 the 99th percentile to five, each beside a plain loopback TCP wake measured
-under the same load.
+under the same load. The far end its kept-connection tests and its timing
+program both stand up, `fixture::keeping`, is written once, behind the
+`test-support` feature, never in a production build.
 
 ## The deduplication key
 

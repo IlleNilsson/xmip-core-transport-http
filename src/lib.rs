@@ -63,6 +63,8 @@
 pub mod basic;
 pub mod endpoint;
 pub mod event_wire;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 pub mod inbound;
 pub mod server;
 pub mod status;
