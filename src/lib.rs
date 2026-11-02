@@ -562,32 +562,6 @@ mod tests {
     }
 
     #[test]
-    fn a_request_answered_after_its_verdict_takes_under_a_millisecond() {
-        // The owner's rule, held: around a payload, Xmip's own work is
-        // under a millisecond — the caller waiting for the verdict, the
-        // reply kept beside its connection and written after, included.
-        const ROUNDS: u32 = 500;
-        let receiver = HttpTransport::loopback();
-        let address = receiver.listening().expect("bound");
-        let target = format!("http://{address}/orders");
-        let sender = std::thread::spawn(move || {
-            let sender = HttpTransport::loopback();
-            for _ in 0..ROUNDS {
-                sender.send(&target, b"x").expect("sent");
-            }
-        });
-        let began = std::time::Instant::now();
-        for _ in 0..ROUNDS {
-            let arrived = receiver.receive().expect("received").remove(0);
-            arrived.taken().expect("accepted");
-        }
-        let each = began.elapsed() / ROUNDS;
-        sender.join().expect("sender");
-        println!("an HTTP request received, accepted and answered: {each:?} each");
-        assert!(each < Duration::from_millis(1), "{each:?} each");
-    }
-
-    #[test]
     fn the_loopback_far_end_serves_http_2_and_http_1_1_alike() {
         for sender in [
             HttpTransport::loopback(),

@@ -142,7 +142,8 @@ kept open between events, in either version, so an event costs one exchange
 rather than a connect. `event_wire::carried` is the read side: a request a
 receiving Xmip took, as the binding reads a `WireEvent` from.
 
-Near, very near real time: `tests/event_wire.rs` measures publish to the
+Near, very near real time: the module's timing program, `tests/measured`
+(run alone, after the rest), measures publish to the
 webhook's receipt over 300 Events and holds the median to a millisecond and
 the 99th percentile to five, each beside a plain loopback TCP wake measured
 under the same load.
