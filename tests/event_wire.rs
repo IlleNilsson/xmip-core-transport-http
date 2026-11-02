@@ -2,145 +2,23 @@
 //! forwarded through this transport's webhook wire to its own far end,
 //! read back as the Event that was published — in both modes of the
 //! binding, over HTTP/1.1 and HTTP/2, presenting the Party's bearer token,
-//! at least once through a webhook that answers 503, and near, very near
-//! real time (the owner, 2026-09-26).
+//! at least once through a webhook that answers 503. How near real time it
+//! is (the owner, 2026-09-26) is held in the module's timing program,
+//! `tests/measured`.
 
 use std::fs;
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use audit::program_audit::ProgramAudit;
-use authorize_party::PartyPolicy;
 use event::Event;
-use event::binding::{Binding, Carried, Mode};
-use event::filter::Filter;
+use event::binding::{Binding, Mode};
 use event::forward::Forwarder;
-use event::hub::{EventSubscription, Hub};
-use event::outcome::Outcome;
-use event::subscriber::Subscriber;
-use net::http::Response;
-use node::Stage;
 use resilience::Guard;
 use retry::Retry;
-use transport::latency::TcpControl;
-use xcore::latency::{spin, spread};
-use xcore::processor_time::ProcessorTime;
-use xcore::{JourneyId, PartyId};
-use xmip_core_transport_http::event_wire::{EventWire, Webhook, carried};
-use xmip_core_transport_http::server;
 
-/// The subscriber, a remote Party.
-const PARTY: PartyId = PartyId::new(23);
+#[path = "event_wire/fixture.rs"]
+mod fixture;
 
-/// A hub whose policy allows the Party these tests subscribe as: being in
-/// this process admits nobody (ADR-0065, amendment 2026-09-26).
-fn allowing() -> Hub {
-    Hub::new(vec![Arc::new(PartyPolicy::new().allow(PARTY))])
-}
-
-/// The token configured to be presented for the Party.
-const TOKEN: &str = "presented-for-party-23";
-
-/// How many Events the latency test forwards.
-const ROUNDS: usize = 300;
-
-/// The bound: about a millisecond, apart from load.
-const BOUND: Duration = Duration::from_millis(1);
-
-const TIMEOUT: Duration = Duration::from_secs(2);
-
-/// A temporary audit directory of its own, never empty and never the
-/// estate's.
-fn audit_at(name: &str) -> PathBuf {
-    let at = std::env::temp_dir().join(format!("xmip-http-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&at);
-    at
-}
-
-fn subscribed(hub: &Hub, at: &Path) -> EventSubscription {
-    let audit = ProgramAudit::new("xmip-core-transport-http tests", Some(at));
-    hub.subscribe(
-        Subscriber::in_process(PARTY, audit),
-        Filter::everything(),
-        0,
-    )
-    .expect("allowed")
-}
-
-fn published() -> Event {
-    Event::completed(
-        Stage::Send,
-        Outcome::Failure,
-        format!(
-            "{}/send/billing",
-            configure::fixture::test_cluster().node_scope(0)
-        ),
-    )
-    .in_journey(JourneyId::new(7))
-    .on_artifact("billing \"east\" 100%")
-    .about(PARTY)
-    .saying("status", "503 Service Unavailable")
-}
-
-/// What the far end took: when, the bearer it was shown, and the event.
-type Taken = (Instant, Option<String>, Carried);
-
-/// The far end: a webhook keeping each connection open as an ordinary
-/// server does, the first `refusing` requests answered 503, each other one
-/// answered 202 and handed over.
-fn far_end(refusing: u32) -> (String, Receiver<Taken>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
-    let address = listener.local_addr().expect("address").to_string();
-    let (tell, told) = mpsc::channel();
-    thread::spawn(move || {
-        let mut refusing = refusing;
-        let within = Some(Duration::from_secs(10));
-        while let Ok((mut stream, _)) = transport::socket::accept_tcp(&listener, within) {
-            loop {
-                let served = server::answer_on(&mut stream, |request| {
-                    let kept = Response::new(503).header("Connection", "keep-alive");
-                    if refusing > 0 {
-                        refusing -= 1;
-                        return (None, kept);
-                    }
-                    let bearer = request.header_value("authorization").map(str::to_string);
-                    let taken = (Instant::now(), bearer, carried(request));
-                    let kept = Response::new(202).header("Connection", "keep-alive");
-                    (Some(taken), kept)
-                });
-                match served {
-                    Ok(Some(taken)) => {
-                        if tell.send(taken).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-    });
-    (address, told)
-}
-
-fn wire(address: &str, h2c: bool) -> EventWire {
-    let webhook = Webhook::new(&format!("http://{address}/hooks/xmip?source=node-n"))
-        .expect("a URL")
-        .presenting_bearer(TOKEN);
-    let webhook = if h2c { webhook.speaking_h2c() } else { webhook };
-    EventWire::new()
-        .to(PARTY, webhook)
-        .timing_out_after(TIMEOUT)
-}
-
-fn read_back(carried: &Carried) -> Event {
-    let wire_event = Binding::Http.read(carried).expect("a WireEvent");
-    wire_event.event().expect("an Xmip Event")
-}
+use fixture::{TIMEOUT, allowing, audit_at, far_end, published, read_back, subscribed, wire};
 
 #[test]
 fn a_published_event_arrives_as_the_same_event_in_either_mode_and_version() {
@@ -207,77 +85,5 @@ fn a_webhook_that_answers_503_is_retried_and_the_events_arrive_in_order() {
         .map(|_| read_back(&told.recv_timeout(TIMEOUT).expect("posted").2))
         .collect();
     assert_eq!(arrived, [first, second], "once each, in order");
-    let _ = fs::remove_dir_all(&at);
-}
-
-#[test]
-fn an_event_reaches_the_webhook_within_a_millisecond_apart_from_load() {
-    let at = audit_at("latency");
-    let hub = Arc::new(allowing());
-    let (address, told) = far_end(0);
-    let mut forwarder = Forwarder::new(
-        subscribed(&hub, &at),
-        Binding::Http,
-        Mode::Binary,
-        wire(&address, false),
-    );
-    // The forwarding thread's processor time over every Event: its waits
-    // are not counted, only its work.
-    let forwarding = thread::spawn(move || {
-        let spent = ProcessorTime::thread();
-        let once = Retry::new(1, Duration::ZERO);
-        let mut carried = 0;
-        while carried < ROUNDS {
-            carried += forwarder
-                .pump(Duration::from_secs(5), &[&once as &dyn Guard])
-                .carried;
-        }
-        spent.elapsed()
-    });
-    let sent = Arc::new(Mutex::new(Vec::with_capacity(ROUNDS)));
-    let receiving = {
-        let sent = Arc::clone(&sent);
-        thread::spawn(move || {
-            (0..ROUNDS)
-                .map(|index| {
-                    let (arrived, _, _) =
-                        told.recv_timeout(Duration::from_secs(5)).expect("posted");
-                    arrived - sent.lock().expect("sent")[index]
-                })
-                .collect::<Vec<Duration>>()
-        })
-    };
-    let mut control = TcpControl::start();
-    let mut publishing = Duration::ZERO;
-
-    for _ in 0..ROUNDS {
-        spin(Duration::from_micros(500));
-        let event = published();
-        sent.lock().expect("sent").push(Instant::now());
-        let from = ProcessorTime::thread();
-        hub.publish(event);
-        publishing += from.elapsed();
-        spin(Duration::from_micros(500));
-        control.poke();
-    }
-
-    let taken = spread(
-        "publish to the HTTP webhook",
-        receiving.join().expect("received"),
-    );
-    let forwarding_time = forwarding.join().expect("forwarded");
-    let machine = control.load();
-    // The wake is a wake: the fastest of each five against the machine's.
-    assert!(
-        taken.fastest_of_five < BOUND + machine.fastest_of_five,
-        "the fastest of five {:?}, the machine's own {:?}",
-        taken.fastest_of_five,
-        machine.fastest_of_five
-    );
-    // Xmip's own work: the publisher's and the forwarder's processor time,
-    // an Event's share.
-    let own = (publishing + forwarding_time) / u32::try_from(ROUNDS).expect("a count");
-    println!("Xmip's own processor time: {own:?} an Event");
-    assert!(own < BOUND, "Xmip's own processor time, {own:?} an Event");
     let _ = fs::remove_dir_all(&at);
 }
