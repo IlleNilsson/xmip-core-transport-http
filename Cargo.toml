@@ -54,6 +54,7 @@ xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core
 name = "measured"
 path = "tests/measured/main.rs"
 test = false
+required-features = ["test-support"]
 
 [dev-dependencies]
 # The test cluster's names, from its `xmip.toml` (`configure::fixture`;
@@ -81,6 +82,11 @@ default = []
 # the standard library, and a forwarder on an edge device should not carry a TLS
 # stack it never opens.
 tls = ["dep:tls", "transport/tls"]
+
+# The far end this crate's tests and its timing program both stand up
+# (`fixture::keeping`), written once and never in a production build
+# (doc/governance/rust-style.md section 5c).
+test-support = []
 
 [lints.rust]
 unsafe_code = "forbid"
