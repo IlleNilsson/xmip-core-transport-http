@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn connections_to_far_ends_that_hung_up_are_closed_not_kept() {
-        // The Playground, 2026-09-29: a WebDAV far end at a new port every
+        // The Essentials, 2026-09-29: a WebDAV far end at a new port every
         // round answered its PUT and hung up, and the kept connection to it
         // was never asked for again — a socket in CLOSE_WAIT a round. A kept
         // connection is closed when this side's socket is: the far end then
