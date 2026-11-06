@@ -147,7 +147,7 @@ fn an_event_reaches_the_webhook_within_a_millisecond_apart_from_load() {
         let event = published();
         sent.lock().expect("sent").push(Instant::now());
         let from = ProcessorTime::thread();
-        hub.publish(event);
+        let _ = hub.publish(event);
         publishing += from.elapsed();
         spin(Duration::from_micros(500));
         control.poke();

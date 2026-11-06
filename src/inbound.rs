@@ -27,8 +27,9 @@
 use std::io::BufReader;
 use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use xcore::lock::Locked;
 
 use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
@@ -167,7 +168,7 @@ fn written(
     last: bool,
     response: &Response,
 ) -> Result<()> {
-    let mut line = line.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut line = line.locked();
     match (&mut line.speaking, stream) {
         (Speaking::One(reader), None) => {
             let mut response = response.clone();
@@ -226,7 +227,7 @@ impl Open for Caller {
     }
 
     fn waiting(&self) -> bool {
-        let line = self.line.lock().unwrap_or_else(PoisonError::into_inner);
+        let line = self.line.locked();
         match &line.speaking {
             Speaking::One(reader) => !reader.buffer().is_empty(),
             Speaking::Two(_) => line.more,
@@ -261,7 +262,7 @@ impl Caller {
         &mut self,
         hear: &mut impl FnMut(Request, SocketAddr) -> Heard<T>,
     ) -> Result<Turn<(T, Option<Reply>)>> {
-        let mut line = self.line.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut line = self.line.locked();
         if matches!(line.speaking, Speaking::Unheard(_))
             && let Speaking::Unheard(stream) = mem::replace(&mut line.speaking, Speaking::Spent)
         {

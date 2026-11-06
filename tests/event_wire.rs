@@ -38,7 +38,7 @@ fn a_published_event_arrives_as_the_same_event_in_either_mode_and_version() {
             wire(&address, h2c),
         );
         let event = published();
-        hub.publish(event.clone());
+        let _ = hub.publish(event.clone());
 
         let once = Retry::new(1, Duration::ZERO);
         let pumped = forwarder.pump(TIMEOUT, &[&once as &dyn Guard]);
@@ -74,8 +74,8 @@ fn a_webhook_that_answers_503_is_retried_and_the_events_arrive_in_order() {
     );
     let first = published();
     let second = published();
-    hub.publish(first.clone());
-    hub.publish(second.clone());
+    let _ = hub.publish(first.clone());
+    let _ = hub.publish(second.clone());
 
     let thrice = Retry::new(3, Duration::ZERO);
     let pumped = forwarder.pump(TIMEOUT, &[&thrice as &dyn Guard]);
