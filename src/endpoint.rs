@@ -233,29 +233,41 @@ fn exchange_on(kept: &mut Kept, request: &Request) -> Result<Response> {
     })
 }
 
-#[cfg(feature = "tls")]
-fn secure(host: &str, tcp: TcpStream, offer: bool) -> Result<(Box<dyn Connection>, Version)> {
-    if !offer {
-        return Ok((Box::new(tls::client(host, tcp)?), Version::Http11));
+cfg_select! {
+    feature = "tls" => {
+        fn secure(
+            host: &str,
+            tcp: TcpStream,
+            offer: bool,
+        ) -> Result<(Box<dyn Connection>, Version)> {
+            if !offer {
+                return Ok((Box::new(tls::client(host, tcp)?), Version::Http11));
+            }
+            let offered = [Version::Http2.alpn(), Version::Http11.alpn()];
+            let mut guarded = tls::client_offering(host, tcp, &offered)?;
+            let agreed = tls::alpn::agreed(&mut guarded)?;
+            Ok((Box::new(guarded), Version::agreed(agreed.as_deref())))
+        }
     }
-    let offered = [Version::Http2.alpn(), Version::Http11.alpn()];
-    let mut guarded = tls::client_offering(host, tcp, &offered)?;
-    let agreed = tls::alpn::agreed(&mut guarded)?;
-    Ok((Box::new(guarded), Version::agreed(agreed.as_deref())))
-}
-
-#[cfg(not(feature = "tls"))]
-fn secure(_host: &str, tcp: TcpStream, _offer: bool) -> Result<(Box<dyn Connection>, Version)> {
-    drop(tcp);
-    Err(transport::error::protocol_error(
-        "https was asked for and this build has no tls feature compiled in",
-    ))
+    _ => {
+        fn secure(
+            _host: &str,
+            tcp: TcpStream,
+            _offer: bool,
+        ) -> Result<(Box<dyn Connection>, Version)> {
+            drop(tcp);
+            Err(transport::error::protocol_error(
+                "https was asked for and this build has no tls feature compiled in",
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixture::keeping;
+    use std::assert_matches;
     use std::io::BufReader;
 
     #[test]
@@ -264,10 +276,14 @@ mod tests {
         let endpoint = Endpoint::parse(&format!("https://{address}")).expect("parsed");
         let failure = connect(&endpoint, None).err();
         drop(listener);
-        #[cfg(not(feature = "tls"))]
-        assert!(failure.expect("no tls").message.contains("tls"));
-        #[cfg(feature = "tls")]
-        assert!(failure.is_none());
+        cfg_select! {
+            feature = "tls" => {
+                assert!(failure.is_none());
+            }
+            _ => {
+                assert!(failure.expect("no tls").message.contains("tls"));
+            }
+        }
     }
 
     #[test]
@@ -353,10 +369,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .expect("timeout");
             let read = stream.read(&mut [0u8; 1]);
-            assert!(
-                matches!(read, Ok(0)),
-                "round {round}: still kept ({read:?})"
-            );
+            assert_matches!(read, Ok(0), "round {round}: still kept ({read:?})");
         }
     }
 
