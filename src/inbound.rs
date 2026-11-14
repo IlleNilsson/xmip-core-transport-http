@@ -34,9 +34,9 @@ use xcore::lock::Locked;
 use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
 use transport::answer::{Answer, Busy};
-use transport::error::{Result, classify};
+use transport::error::{Result, TransportError, classify};
 use transport::serving::{Open, Serving, Turn};
-use transport::{Acknowledgement, Verdict};
+use transport::{Acknowledgement, Turned, Verdict};
 
 /// A Receive Location's listener and the connections kept open on it.
 #[derive(Clone, Debug, Default)]
@@ -52,15 +52,21 @@ pub enum Heard<T> {
     /// A Stream: the caller waits for the answer its [`Reply`] gives after
     /// the receive cycle.
     Waiting(T),
+    /// Not the technology's message, refused at the door for why: answered
+    /// now with the response as the connection's last, and the caller
+    /// turned away ([`Inbound::turned_away`]) while the receive goes on for
+    /// the others. A caller's refusal is never the receive's failure.
+    Refused(TransportError, Response),
 }
 
 impl<T> Heard<T> {
-    /// The same answer or wait, carrying `f` of what was heard: what a
-    /// technology riding on HTTP adds to it — who sent the request.
+    /// The same answer, wait or refusal, carrying `f` of what was heard:
+    /// what a technology riding on HTTP adds to it — who sent the request.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Heard<U> {
         match self {
             Self::Answered(heard, answer) => Heard::Answered(f(heard), answer),
             Self::Waiting(heard) => Heard::Waiting(f(heard)),
+            Self::Refused(why, answer) => Heard::Refused(why, answer),
         }
     }
 }
@@ -81,10 +87,13 @@ impl Inbound {
     /// call and kept. `hear` is handed the caller's address, which an
     /// origin names.
     ///
+    /// A caller whose connection broke or carried a malformed request is
+    /// let go and turned away ([`Inbound::turned_away`]), and the wait goes
+    /// on for the others.
+    ///
     /// # Errors
-    /// Where the listener could not be bound, nothing arrived within
-    /// `timeout`, or a caller's connection broke or carried a malformed
-    /// request — that connection is let go.
+    /// Where the listener could not be bound, waited on or accepted from,
+    /// or nothing arrived within `timeout`.
     pub fn next<T>(
         &self,
         bind: impl FnOnce() -> Result<(TcpListener, String)>,
@@ -114,6 +123,14 @@ impl Inbound {
     #[must_use]
     pub fn open(&self) -> usize {
         self.serving.open()
+    }
+
+    /// The callers turned away at their own connection since this was last
+    /// asked, taken: what every technology receiving through this hands
+    /// the runtime as its `Transport::turned_away`.
+    #[must_use]
+    pub fn turned_away(&self) -> Turned {
+        self.serving.turned_away()
     }
 }
 
@@ -305,6 +322,13 @@ impl Caller {
                 (taken, None)
             }
             Heard::Waiting(taken) => (taken, Some(self.reply(stream, last)?)),
+            Heard::Refused(why, response) => {
+                let reply = self.reply(stream, true)?;
+                drop(line);
+                // Answered or not, the caller is let go for why.
+                drop(reply.answer(&response));
+                return Err(why);
+            }
         };
         Ok(if last {
             Turn::Last(taken)
@@ -473,6 +497,75 @@ mod tests {
             .expect("heard");
         assert_eq!((said.as_slice(), reply.is_none()), (&b"hello"[..], true));
         assert_eq!(caller.join().expect("caller"), 200);
+    }
+
+    #[test]
+    fn a_caller_past_a_bound_is_turned_away_and_the_next_caller_served() {
+        let inbound = Inbound::new();
+        let binds = AtomicUsize::new(0);
+        let address = bound(&inbound, &binds);
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let mut breaching = std::net::TcpStream::connect(&address).expect("connect");
+        breaching.set_read_timeout(WAIT).expect("a bounded wait");
+        let from = breaching.local_addr().expect("its address");
+        // A head past the longest line read, never ended: no request. The
+        // next caller calls once it is let go, so it is taken first.
+        let callers = std::thread::spawn(move || {
+            let head = vec![b'a'; net::read::MAX_LINE + 1];
+            drop(std::io::Write::write_all(&mut breaching, &head));
+            drop(std::io::Read::read_to_end(&mut breaching, &mut Vec::new()));
+            Connections::new()
+                .exchange(&at, WAIT, Offer::Http11, &post(&at, b"after"))
+                .expect("answered")
+                .status
+        });
+        assert_eq!(accepted(&inbound).expect("the next caller").0, b"after");
+        assert_eq!(callers.join().expect("callers"), 202);
+        let turned = inbound.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(turned.callers[0].peer, from);
+        assert!(inbound.turned_away().is_empty(), "taken once");
+    }
+
+    #[test]
+    fn a_request_refused_at_the_door_is_answered_and_the_next_caller_served() {
+        let inbound = Inbound::new();
+        let binds = AtomicUsize::new(0);
+        let address = bound(&inbound, &binds);
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let callers = std::thread::spawn(move || {
+            let refused = Connections::new()
+                .exchange(&at, WAIT, Offer::Http11, &post(&at, b"not ours"))
+                .expect("answered");
+            let next = Connections::new()
+                .exchange(&at, WAIT, Offer::Http11, &post(&at, b"ours"))
+                .expect("answered");
+            (refused.status, refused.body, next.status)
+        });
+        let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
+        let hear = |request: Request, peer| {
+            if request.body == b"not ours" {
+                let why = TransportError::permanent("not this technology's message");
+                return Heard::Refused(why, Response::new(400).body(b"not ours"));
+            }
+            waiting(request, peer)
+        };
+        let (taken, reply) = inbound.next(unbound, WAIT, hear).expect("the next caller");
+        assert_eq!(taken.0, b"ours");
+        reply
+            .expect("waiting")
+            .answer(&Response::new(202))
+            .expect("answered");
+        assert_eq!(
+            callers.join().expect("callers"),
+            (400, b"not ours".to_vec(), 202)
+        );
+        let turned = inbound.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(
+            turned.callers[0].why.message,
+            "not this technology's message"
+        );
     }
 
     #[test]

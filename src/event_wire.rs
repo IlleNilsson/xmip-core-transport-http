@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use event::binding::Carried;
-use event::forward::Wire;
+use event::wire::Wire;
 use net::Endpoint;
 use net::http::Request;
 use transport::error::Result;
