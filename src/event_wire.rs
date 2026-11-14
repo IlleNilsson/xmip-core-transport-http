@@ -3,14 +3,17 @@
 //! subscription to (ADR-0065 clause 3), and the read side a receiving
 //! Xmip turns a request back into an event with.
 //!
-//! What goes on the request is decided once, in `xmip-core-event`'s
-//! binding: this file only puts a [`Carried`] where the HTTP protocol
-//! binding 1.0.2 puts it — a `POST` whose body is the body, whose
+//! **The HTTP protocol binding's rules are here** ([`HttpEventRules`], 1.0.2):
+//! an attribute's header is `ce-` and its name, matched without regard to
+//! case as HTTP matches names, and its value percent-encoded where the
+//! binding says. The two modes over them are `xmip-core-event`'s, once
+//! (`event::binding::Rules`). This file puts the [`Carried`] they write
+//! where the binding puts it — a `POST` whose body is the body, whose
 //! `Content-Type` is the content type, and whose `ce-` headers are the
-//! attributes, already escaped — and takes it back off a request the same
-//! way. The request goes out through this transport's own exchange,
-//! HTTP/2 or HTTP/1.1 as the connection agrees, TLS through the estate's
-//! own where the webhook is `https://` (the `tls` feature).
+//! attributes — and takes it back off a request the same way. The request
+//! goes out through this transport's own exchange, HTTP/2 or HTTP/1.1 as
+//! the connection agrees, TLS through the estate's own where the webhook
+//! is `https://` (the `tls` feature).
 //!
 //! The answer is judged as every answer HTTP gets is ([`status::judge`]):
 //! 2xx acknowledged; 5xx, 408 and 429 retryable; any other 4xx permanent,
@@ -33,10 +36,13 @@
 //! kept connection meanwhile is connected to afresh at once, the event
 //! sent again: at least once.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use event::binding::Carried;
+use codec::percent::{decode_strict, encode_keeping};
+use event::EventError;
+use event::binding::{Carried, Rules};
 use event::wire::Wire;
 use net::Endpoint;
 use net::http::Request;
@@ -46,6 +52,54 @@ use xcore::PartyId;
 
 use crate::endpoint::{Connections, Offer};
 use crate::status;
+
+/// The prefix an attribute's header carries on HTTP.
+pub const PREFIX: &str = "ce-";
+
+/// The HTTP protocol binding's rules: `ce-` headers, matched without
+/// regard to case, and each value percent-encoded where the binding says.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HttpEventRules;
+
+impl Rules for HttpEventRules {
+    fn prefix(&self) -> &'static str {
+        PREFIX
+    }
+
+    /// The name after `ce-` in any case: HTTP's header names are.
+    fn attribute<'h>(&self, header: &'h str) -> Option<&'h str> {
+        let (head, name) = header.split_at_checked(PREFIX.len())?;
+        head.eq_ignore_ascii_case(PREFIX).then_some(name)
+    }
+
+    /// Space, `"`, `%` and anything outside printable ASCII
+    /// percent-encoded (HTTP binding section 3.1.3.2), and nothing else.
+    fn escaped<'v>(&self, value: &'v str) -> Cow<'v, str> {
+        if value.bytes().all(plain) {
+            Cow::Borrowed(value)
+        } else {
+            Cow::Owned(encode_keeping(value, plain))
+        }
+    }
+
+    /// The escapes read back, a `%` that two hex digits do not follow
+    /// refused, and the bytes they make held to UTF-8.
+    fn unescaped<'v>(&self, value: &'v str) -> std::result::Result<Cow<'v, str>, EventError> {
+        if !value.contains('%') {
+            return Ok(Cow::Borrowed(value));
+        }
+        let bytes =
+            decode_strict(value.as_bytes()).map_err(|error| EventError::new(error.to_string()))?;
+        String::from_utf8(bytes)
+            .map(Cow::Owned)
+            .map_err(|_| EventError::new("a header that is not UTF-8 once decoded"))
+    }
+}
+
+/// A byte a header value carries as it is.
+fn plain(byte: u8) -> bool {
+    (0x21..=0x7e).contains(&byte) && !matches!(byte, b'"' | b'%')
+}
 
 /// Where one Party's events are posted, and what is presented there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +195,10 @@ impl Default for EventWire {
 }
 
 impl Wire for EventWire {
+    fn rules(&self) -> &dyn Rules {
+        &HttpEventRules
+    }
+
     /// One `POST` to the Party's webhook, a 2xx its acknowledgement.
     fn carry(&self, party: PartyId, carried: &Carried) -> std::result::Result<(), Failure> {
         let webhook = self.webhooks.get(&party).ok_or_else(|| {
@@ -162,9 +220,9 @@ impl Wire for EventWire {
     }
 }
 
-/// What `request` carries, for the binding to read a `WireEvent` from:
-/// its `Content-Type` as the content type, every other header as it came,
-/// its body.
+/// What `request` carries, for [`HttpEventRules`] to read a `WireEvent`
+/// from: its `Content-Type` as the content type, every other header as it
+/// came, its body.
 #[must_use]
 pub fn carried(request: &Request) -> Carried {
     Carried {

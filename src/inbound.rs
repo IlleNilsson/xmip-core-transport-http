@@ -34,6 +34,7 @@ use xcore::lock::Locked;
 use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
 use transport::answer::{Answer, Busy};
+use transport::deadline::Within;
 use transport::error::{Result, TransportError, classify};
 use transport::serving::{Open, Serving, Turn};
 use transport::{Acknowledgement, Turned, Verdict};
@@ -78,6 +79,22 @@ impl Inbound {
         Self {
             serving: Serving::new(),
         }
+    }
+
+    /// Each caller's turn taking at most `turn`, every read of it waiting
+    /// only what is left (`transport::serving::Serving::turning_within`):
+    /// a request head sent in part and never ended is cut at its turn.
+    #[must_use]
+    pub fn turning_within(self, turn: Duration) -> Self {
+        Self {
+            serving: self.serving.turning_within(turn),
+        }
+    }
+
+    /// The most one caller's turn takes.
+    #[must_use]
+    pub const fn turn(&self) -> Duration {
+        self.serving.turn()
     }
 
     /// The next request from whichever caller sends first within `timeout`
@@ -231,10 +248,11 @@ struct Line {
     more: bool,
 }
 
+/// The version a connection speaks, its reads within each turn.
 enum Speaking {
-    Unheard(TcpStream),
-    One(BufReader<Replayed<TcpStream>>),
-    Two(Box<Server<Replayed<TcpStream>>>),
+    Unheard(Within),
+    One(BufReader<Replayed<Within>>),
+    Two(Box<Server<Replayed<Within>>>),
     Spent,
 }
 
@@ -258,8 +276,9 @@ impl Open for Caller {
 }
 
 impl Caller {
-    fn new(stream: TcpStream, peer: SocketAddr) -> Result<Self> {
+    fn new(stream: Within, peer: SocketAddr) -> Result<Self> {
         let probe = stream
+            .socket()
             .try_clone()
             .map_err(|e| classify("keeping the connection", &e))?;
         Ok(Self {
@@ -281,7 +300,7 @@ impl Caller {
     ) -> Result<Turn<(T, Option<Reply>)>> {
         let mut line = self.line.locked();
         if matches!(line.speaking, Speaking::Unheard(_))
-            && let Speaking::Unheard(stream) = mem::replace(&mut line.speaking, Speaking::Spent)
+            && let Speaking::Unheard(mut stream) = mem::replace(&mut line.speaking, Speaking::Spent)
         {
             // A caller that connected and closed without a word — a poke,
             // a pool that opened ahead — has hung up, not failed.
@@ -356,7 +375,7 @@ fn closes(said: Option<&str>) -> bool {
 
 /// The version a connection speaks, told from its first octets, which are
 /// read again.
-fn heard(mut stream: TcpStream) -> Result<Speaking> {
+fn heard(mut stream: Within) -> Result<Speaking> {
     let (h2, first) = sniff(&mut stream)?;
     let connection = Replayed::new(first, stream);
     Ok(if h2 {
@@ -525,6 +544,39 @@ mod tests {
         assert_eq!(turned.callers.len(), 1, "{turned:?}");
         assert_eq!(turned.callers[0].peer, from);
         assert!(inbound.turned_away().is_empty(), "taken once");
+    }
+
+    #[test]
+    fn a_head_sent_in_part_is_cut_at_its_turn_and_the_next_caller_served() {
+        // Half a head, never ended. Until 2026-11-14 it held the turn as
+        // long as a read waits — five seconds here, for good where a
+        // Location waits as long as it takes — and every caller behind it.
+        let turn = Duration::from_millis(200);
+        let inbound = Inbound::new().turning_within(turn);
+        assert_eq!(inbound.clone().turn(), turn);
+        let binds = AtomicUsize::new(0);
+        let address = bound(&inbound, &binds);
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let mut stopped = std::net::TcpStream::connect(&address).expect("connect");
+        let from = stopped.local_addr().expect("its address");
+        let half = b"POST /orders HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-";
+        std::io::Write::write_all(&mut stopped, half).expect("half a head");
+        let caller = std::thread::spawn(move || {
+            Connections::new()
+                .exchange(&at, WAIT, Offer::Http11, &post(&at, b"after"))
+                .expect("answered")
+                .status
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(accepted(&inbound).expect("the next caller").0, b"after");
+        let took = began.elapsed();
+        assert!(took < Duration::from_secs(3), "served after {took:?}");
+        assert_eq!(caller.join().expect("caller"), 202);
+        let turned = inbound.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(turned.callers[0].peer, from);
+        assert!(turned.callers[0].why.message.contains("turn"), "{turned:?}");
+        drop(stopped);
     }
 
     #[test]

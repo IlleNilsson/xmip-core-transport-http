@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use audit::program_audit::ProgramAudit;
 use authorize_party::PartyPolicy;
 use event::Event;
-use event::binding::{Binding, Carried};
+use event::binding::{Carried, Rules};
 use event::filter::Filter;
 use event::outcome::Outcome;
 use net::http::Response;
@@ -21,7 +21,7 @@ use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
 use xcluster::delivery::subscriber::fixture;
 use xcore::{JourneyId, PartyId};
-use xmip_core_transport_http::event_wire::{EventWire, Webhook, carried};
+use xmip_core_transport_http::event_wire::{EventWire, HttpEventRules, Webhook, carried};
 use xmip_core_transport_http::server;
 
 /// The subscriber, a remote Party.
@@ -123,6 +123,6 @@ pub fn wire(address: &str, h2c: bool) -> EventWire {
 }
 
 pub fn read_back(carried: &Carried) -> Event {
-    let wire_event = Binding::Http.read(carried).expect("a WireEvent");
+    let wire_event = HttpEventRules.read(carried).expect("a WireEvent");
     wire_event.event().expect("an Xmip Event")
 }

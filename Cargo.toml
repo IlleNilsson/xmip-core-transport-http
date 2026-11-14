@@ -29,14 +29,16 @@ tls = { package = "xmip-core-library-tls", git = "https://github.com/IlleNilsson
 # (`net::http`): the one codec this transport and every technology riding
 # on it exchange a request for its answer with.
 net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
-# Percent-encoding, written and read once for the estate.
+# Percent-encoding, written and read once for the estate: the HTTP event
+# binding's escaping among its users.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 # The event capability's wire (ADR-0065 clause 3): the Wire this crate
-# implements and the Carried it posts — the wire event's HTTP binding is
-# written there, once. Not behind a feature, as TLS is: every node links
-# it already, through the runtime, so a feature would only hide the wire
-# from `cargo test`. A Technology may depend on Foundation
-# (repository-model.md section 4).
+# implements, the Carried it posts and the Rules its HTTP binding answers
+# by — the two modes over them are written there, once, and the HTTP
+# binding's prefix, matching and escaping here. Not behind a feature, as
+# TLS is: every node links it already, through the runtime, so a feature
+# would only hide the wire from `cargo test`. A Technology may depend on
+# Foundation (repository-model.md section 4).
 event = { package = "xmip-core-event", git = "https://github.com/IlleNilsson/xmip-core-event", branch = "main" }
 # The failure a Wire's attempt answers with, which the guards judge.
 resilience = { package = "xmip-core-resilience", git = "https://github.com/IlleNilsson/xmip-core-resilience", branch = "main" }

@@ -19,8 +19,9 @@
 //! status.rs     the judgment of an answer's status, for the
 //!               technologies that ride on HTTP
 //! event_wire.rs
-//!               the event capability's webhook: a `WireEvent` posted as
-//!               the HTTP binding says, and read back off a request
+//!               the event capability's webhook and the HTTP binding's
+//!               rules: a `WireEvent` posted as the binding says, and read
+//!               back off a request
 //! ```
 //!
 //! **HTTP/2 or HTTP/1.1, per connection.** A Send Location offers `h2`
@@ -346,6 +347,12 @@ impl Configured for HttpTransport {
     fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
         self.secret = Some(secret);
         Ok(self)
+    }
+
+    /// Each caller's turn on a Receive Location taking at most `turn`.
+    fn turning_within(mut self, turn: Duration) -> Self {
+        self.inbound = self.inbound.turning_within(turn);
+        self
     }
 }
 
