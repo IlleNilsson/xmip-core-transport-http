@@ -99,7 +99,12 @@ connection's last, its caller turned away, and the receive goes on for the
 others; a caller whose connection breaks or carries a malformed request is
 let go the same way, and `Inbound::turned_away` hands every one to the
 technology's `Transport::turned_away` for the runtime to audit (ADR-0018,
-amendment 2026-11-13). The
+amendment 2026-11-13). A caller's turn — one request read whole — takes
+at most the node's `[tuning] receive_turn`, a minute by default
+(`Inbound::turning_within`), every read of it waiting only what is left:
+a head sent in part and never ended, or a body a byte at a time, is cut
+at its turn and its caller turned away (ADR-0018, amendment 2026-11-14).
+Every technology riding on HTTP hands its `Inbound` the node's span. The
 request body is read whole by `net::http`, within `net::MAX_BODY`, and
 handed to the runtime as a reader over it.
 
@@ -134,9 +139,13 @@ service pushing to its subscriber.
 
 Since 2026-09-26 this transport carries the event capability's wire events
 (ADR-0065 clause 3). `event_wire::EventWire` implements
-[xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`:
-it `POST`s what the event crate's HTTP binding wrote — structured or binary
-mode, the `ce-` headers already escaped there, once — to the webhook
+[xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`,
+and the HTTP protocol binding's rules are here, `event_wire::HttpEventRules`
+(ADR-0065, amendment 2026-11-14): `ce-` headers, matched without regard to
+case, each value percent-encoded where the binding says, through
+`codec::percent`. The wire answers them (`Wire::rules`), the event crate
+writes either mode over them, once, and the wire `POST`s what was written
+— structured or binary mode — to the webhook
 configured for the subscriber's Party, through `endpoint::Connections`,
 TLS through the estate's own for `https://`. A 2xx is the
 acknowledgement; 5xx, 408, 429 and a failed connection are retryable, any
@@ -146,7 +155,7 @@ configured for the Party (ADR-0019 clause 3); a client certificate waits on
 the estate's TLS offering a client identity. The connection to a webhook is
 kept open between events, in either version, so an event costs one exchange
 rather than a connect. `event_wire::carried` is the read side: a request a
-receiving Xmip took, as the binding reads a `WireEvent` from.
+receiving Xmip took, as `HttpEventRules` reads a `WireEvent` from.
 
 Near, very near real time: the module's timing program, `tests/measured`
 (run alone, after the rest), measures publish to the

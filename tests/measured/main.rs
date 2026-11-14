@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use event::binding::{Binding, Mode};
+use event::binding::Mode;
 use net::Endpoint;
 use net::http::Request;
 use resilience::Guard;
@@ -107,12 +107,7 @@ fn an_event_reaches_the_webhook_within_a_millisecond_apart_from_load() {
     let at = audit_at("latency");
     let hub = Arc::new(allowing());
     let (address, told) = far_end(0);
-    let mut forwarder = Forwarder::new(
-        subscribed(&hub, &at),
-        Binding::Http,
-        Mode::Binary,
-        wire(&address, false),
-    );
+    let mut forwarder = Forwarder::new(subscribed(&hub, &at), Mode::Binary, wire(&address, false));
     // The forwarding thread's processor time over every Event: its waits
     // are not counted, only its work.
     let forwarding = thread::spawn(move || {
