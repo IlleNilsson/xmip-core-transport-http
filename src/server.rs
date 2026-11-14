@@ -14,9 +14,12 @@ use std::time::Duration;
 
 use net::http::{Request, Response, read_request, write_response};
 use net::http2::{Replayed, Server, sniff};
+use net::{Endpoint, Schemes, Target};
 use transport::error::{Result, protocol_error};
 use transport::socket;
-use transport::{Acknowledgement, ArrivalIdentity, Arrived, Headers, Refusal, Taken, Verdict};
+use transport::{
+    Acknowledgement, ArrivalIdentity, Arrived, Headers, Refusal, Taken, TransportError, Verdict,
+};
 
 use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI};
 
@@ -142,6 +145,40 @@ impl Sender {
     }
 }
 
+/// What a listener entered with a secure scheme is refused with: no
+/// Receive Location riding on HTTP terminates TLS yet (open problem 61).
+pub const NOT_TERMINATED: &str = "asks for TLS, which a Receive Location riding on HTTP does \
+                                  not terminate yet, and is refused rather than served \
+                                  without it";
+
+/// Bind a Receive Location's listener at the address it was `entered`
+/// with, read under the `schemes` its technology declares
+/// (`net::Endpoint::parse_under`): in the clear where the scheme is a
+/// plain one, and refused where it asks for TLS. A bare `host:port` a
+/// program gives names no scheme and is bound as it is. The one rule every
+/// technology riding on HTTP listens through, so none decides for itself
+/// whether its address asked for TLS.
+///
+/// # Errors
+/// Where the scheme asks for TLS — permanent, naming the plain address to
+/// enter instead — the address is none of `schemes`, or the bind fails.
+pub fn listen(entered: &str, schemes: &Schemes) -> Result<(TcpListener, String)> {
+    let Ok(named) = Target::parse(entered) else {
+        return socket::bind_tcp(entered);
+    };
+    let endpoint = Endpoint::parse_under(entered, schemes)?;
+    if endpoint.secure() {
+        // Scheme, authority and path: never the user information.
+        let at = format!("{}{}", endpoint.address(), endpoint.path());
+        let asked = named.scheme().to_ascii_lowercase();
+        let plain = schemes.plain_twin(&asked).unwrap_or("http");
+        return Err(TransportError::permanent(format!(
+            "{asked}://{at} {NOT_TERMINATED}: enter it as {plain}://{at} to listen in the clear"
+        )));
+    }
+    socket::bind_tcp(&endpoint.address())
+}
+
 /// Accept one request within `timeout`, with `timeout` on its reads, and
 /// answer it `202` as it is taken: what the Loopback far end does.
 ///
@@ -242,6 +279,36 @@ mod tests {
     use super::*;
     use crate::endpoint;
     use net::Endpoint;
+
+    #[test]
+    fn a_secure_scheme_is_refused_naming_its_plain_twin_and_a_plain_one_listens() {
+        const AS4: Schemes = Schemes {
+            plain: &["http", "as4"],
+            secure: &["https", "as4s"],
+        };
+        let refused = listen("AS4S://user@127.0.0.1:8443/msh", &AS4).expect_err("TLS");
+        assert!(!refused.retryable, "{refused}");
+        assert_eq!(
+            refused.message,
+            format!(
+                "as4s://127.0.0.1:8443/msh {NOT_TERMINATED}: enter it as \
+                 as4://127.0.0.1:8443/msh to listen in the clear"
+            )
+        );
+        let https = listen("https://127.0.0.1:0", &AS4).expect_err("TLS");
+        assert!(
+            https.message.contains("enter it as http://127.0.0.1:0/"),
+            "{https}"
+        );
+        let (_, plain) = listen("as4://127.0.0.1:0/msh", &AS4).expect("in the clear");
+        assert!(plain.starts_with("127.0.0.1:"), "{plain}");
+        let (_, bare) = listen("127.0.0.1:0", &AS4).expect("a bare address");
+        assert!(bare.starts_with("127.0.0.1:"), "{bare}");
+        assert!(
+            listen("as2s://127.0.0.1:0", &AS4).is_err(),
+            "not this technology's"
+        );
+    }
 
     #[test]
     fn one_request_is_served_with_what_the_session_answers() {

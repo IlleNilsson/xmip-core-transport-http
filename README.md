@@ -92,8 +92,14 @@ receipt — and takes these statuses where its protocol answers in HTTP's. The r
 busy (`transport::answer::Busy`, `serving::Open::busy`): it takes no next
 request. A reply dropped unanswered shuts the connection, so a caller is
 never left waiting. A
-request that carries no Stream — a handshake, a refusal of what is not the
-protocol's message — is answered at once (`inbound::Heard::Answered`). The
+request that carries no Stream — a handshake — is answered at once
+(`inbound::Heard::Answered`). One that is not the technology's message is
+refused at the door (`inbound::Heard::Refused`): answered as the
+connection's last, its caller turned away, and the receive goes on for the
+others; a caller whose connection breaks or carries a malformed request is
+let go the same way, and `Inbound::turned_away` hands every one to the
+technology's `Transport::turned_away` for the runtime to audit (ADR-0018,
+amendment 2026-11-13). The
 request body is read whole by `net::http`, within `net::MAX_BODY`, and
 handed to the runtime as a reader over it.
 
@@ -166,4 +172,4 @@ The included workflow is manual-only and calls the versioned shared workflow at
 
 ## The address alone
 
-A Location is entered by its address (ADR-0064, amendment 2026-10-28): `http://` or `https://`, the scheme choosing this technology. A Send Location posts to the URL; `https://` brings TLS. A Receive Location listens at the address's authority, port 80 where it names none; `https://` would listen in TLS, which an HTTP receive does not terminate yet, so it is refused as it binds, in words saying to enter it as `http://`.
+A Location is entered by its address (ADR-0064, amendment 2026-10-28): `http://` or `https://`, the scheme choosing this technology. A Send Location posts to the URL; `https://` brings TLS. A Receive Location listens at the address's authority, port 80 where it names none; `https://` would listen in TLS, which an HTTP receive does not terminate yet, so it is refused as it binds, in words naming the `http://` address to enter instead. `server::listen` is that rule for every technology riding on HTTP — AS2, AS4, Peppol's access point, MSMQ and WebDAV's far end bind through it under their own schemes, a bare `host:port` bound as it is — so none listens in the clear on a secure scheme (ADR-0033, amendment 2026-11-13; terminating TLS there is open problem 68).
