@@ -153,14 +153,6 @@ impl HttpTransport {
         self
     }
 
-    /// Give up on a connection that does not arrive, or stops sending, as
-    /// `TcpTransport` does.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind at the address the Location was entered with and report the
     /// address actually assigned: `http://` in the clear, `https://`
     /// refused as asking for TLS ([`server::listen`]).
@@ -308,14 +300,12 @@ impl Configured for HttpTransport {
                           HTTP/1.1 in the clear when left out.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a connection is waited for, accepted or opened, and how \
-                          long one that stops sending is waited on; unbounded when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a connection is waited for, accepted or opened, and how \
+                 long one that stops sending is waited on; unbounded when left out.",
+            ),
         ],
     };
 
@@ -327,6 +317,10 @@ impl Configured for HttpTransport {
         address
     }
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
     /// A Receive Location listens at the address's authority, the scheme's
     /// port where it names none; `https://` asks for TLS, which a receive
     /// does not terminate yet ([`HttpTransport::bind`]).
@@ -334,9 +328,6 @@ impl Configured for HttpTransport {
         let mut transport = Self::new(address);
         if settings.optional_boolean("h2c") == Some(true) {
             transport = transport.speaking_h2c();
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }
