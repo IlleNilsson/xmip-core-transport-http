@@ -178,13 +178,16 @@ impl HttpTransport {
         self.inbound.bound(|| self.bind())
     }
 
-    /// Take one request from an already-bound listener and answer it.
+    /// Take one request from an already-bound listener and answer it, its
+    /// HTTP/2 frames in a span counted on the Clock the transport was timed
+    /// by.
     ///
     /// # Errors
     ///
     /// As [`server::accept_one`].
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Taken> {
-        server::accept_one(listener, self.timeout)
+        let clock = std::sync::Arc::clone(self.connections.clock());
+        server::accept_one(listener, self.timeout, clock)
     }
 }
 

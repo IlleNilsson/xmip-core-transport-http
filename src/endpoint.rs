@@ -194,6 +194,14 @@ impl Connections {
         self
     }
 
+    /// The Clock these count on: the one their transport was timed by,
+    /// which its far end's one request off a listener counts on too
+    /// (`server::serve_one`).
+    #[must_use]
+    pub const fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     /// Send `request` to `endpoint` on a connection kept to it, or on a new
     /// one opened within `timeout` offering `offer`, and read its answer.
     ///

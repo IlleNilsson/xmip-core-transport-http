@@ -75,8 +75,12 @@ transport = { package = "xmip-core-transport", git = "https://github.com/IlleNil
 # support, as every crate's fixture is, and never a production build
 # (ADR-0065, amendment 2026-11-13).
 xcluster = { package = "xmip-core-cluster", git = "https://github.com/IlleNilsson/xmip-core-cluster", branch = "main", default-features = false, features = ["test-support"] }
-# The processor time an Event's threads used, which the tests hold.
+# The processor time an Event's threads used, which the tests hold, and the
+# Clock a test steps (`xcore::clock::Stepped`).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main", features = ["test-support"] }
+# The HTTP/2 peer that floods PINGs either side of a span, which one
+# request off a connection is held to (`net::fixture::pinging`).
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main", features = ["test-support"] }
 # The forwarding tests: a subscriber's audit, the stage an Event reports,
 # and one real retry guard.
 audit = { package = "xmip-core-audit", git = "https://github.com/IlleNilsson/xmip-core-audit", branch = "main" }

@@ -273,7 +273,8 @@ mod tests {
         let far_end = std::thread::spawn(move || {
             (0..2)
                 .map(|_| {
-                    crate::server::serve_one(&listener, timeout, |request| {
+                    let clock = std::sync::Arc::new(xcore::SystemClock);
+                    crate::server::serve_one(&listener, timeout, clock, |request| {
                         let kept = Response::new(202).header("Connection", "keep-alive");
                         (request.body.clone(), kept)
                     })

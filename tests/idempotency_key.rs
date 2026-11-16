@@ -3,11 +3,13 @@
 //! attempt on one Journey; an unkeyed send carries none.
 
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::thread;
 
 use net::http::Response;
 use transport::Transport;
 use transport::loopback::LOOPBACK_TIMEOUT;
+use xcore::SystemClock;
 use xmip_core_transport_http::{HttpTransport, server};
 
 /// A Journey's identifier, as the runtime hands it.
@@ -19,7 +21,8 @@ fn hearing(listener: TcpListener, requests: usize) -> thread::JoinHandle<Vec<Opt
     thread::spawn(move || {
         (0..requests)
             .map(|_| {
-                server::serve_one(&listener, Some(LOOPBACK_TIMEOUT), |request| {
+                let clock = Arc::new(SystemClock);
+                server::serve_one(&listener, Some(LOOPBACK_TIMEOUT), clock, |request| {
                     let key = request.header_value("idempotency-key").map(str::to_string);
                     (key, Response::new(server::ACCEPTED))
                 })

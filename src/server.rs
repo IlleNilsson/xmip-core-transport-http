@@ -7,9 +7,16 @@
 //! apart: the octets read to tell are read again. What is the transport's
 //! is the connection accepted within its timeout, what a Receive Location
 //! answers, and the Stream that arrived.
+//!
+//! **One request counts on the Clock its caller hands it** (ADR-0068,
+//! amendment 2026-11-16): an HTTP/2 caller's frames in a span are counted
+//! on that Clock's monotonic reading — a technology's the one it was timed
+//! by (`Connections::clock`), a far end that holds none the operating
+//! system's.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
+use std::sync::Arc;
 use std::time::Duration;
 
 use net::http::{Request, Response, read_request, write_response};
@@ -22,7 +29,7 @@ use transport::{
 };
 
 use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI};
-use xcore::{Clock, SystemClock};
+use xcore::Clock;
 
 /// What Xmip answers a caller whose Stream the receive cycle accepted.
 ///
@@ -181,14 +188,19 @@ pub fn listen(entered: &str, schemes: &Schemes) -> Result<(TcpListener, String)>
 }
 
 /// Accept one request within `timeout`, with `timeout` on its reads, and
-/// answer it `202` as it is taken: what the Loopback far end does.
+/// answer it `202` as it is taken: what the Loopback far end does. Its
+/// HTTP/2 frames in a span are counted on `clock`.
 ///
 /// # Errors
 ///
 /// Where nothing connected within `timeout`, the connection failed, the
 /// request was malformed, or the body was larger than `net::MAX_BODY`.
-pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<Taken> {
-    serve_one_from(listener, timeout, |request, peer| {
+pub fn accept_one(
+    listener: &TcpListener,
+    timeout: Option<Duration>,
+    clock: Arc<dyn Clock>,
+) -> Result<Taken> {
+    serve_one_from(listener, timeout, clock, |request, peer| {
         let at_once = Acknowledgement::at_most_once("answered 202 as it is taken");
         (
             arrived(request.clone(), peer, at_once).taken(),
@@ -198,8 +210,9 @@ pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<T
 }
 
 /// Accept one connection on `listener`, with `timeout` on its reads, read
-/// the one request it carries, answer it as `answer` says, and report what
-/// `answer` made of it.
+/// the one request it carries, its HTTP/2 frames in a span counted on
+/// `clock`, answer it as `answer` says, and report what `answer` made of
+/// it.
 ///
 /// The far end every REST technology runs on loopback — s3, azure-blob,
 /// google-pub-sub and seven more — accepted, split, read, answered and
@@ -212,9 +225,10 @@ pub fn accept_one(listener: &TcpListener, timeout: Option<Duration>) -> Result<T
 pub fn serve_one<T>(
     listener: &TcpListener,
     timeout: Option<Duration>,
+    clock: Arc<dyn Clock>,
     answer: impl FnOnce(&Request) -> (T, Response),
 ) -> Result<T> {
-    serve_one_from(listener, timeout, |request, _| answer(request))
+    serve_one_from(listener, timeout, clock, |request, _| answer(request))
 }
 
 /// [`serve_one`], with the peer it serves handed to `answer`: an origin
@@ -227,18 +241,19 @@ pub fn serve_one<T>(
 pub fn serve_one_from<T>(
     listener: &TcpListener,
     timeout: Option<Duration>,
+    clock: Arc<dyn Clock>,
     answer: impl FnOnce(&Request, SocketAddr) -> (T, Response),
 ) -> Result<T> {
     // The wait for the connection is bounded as well as the reads. This did
     // a bare accept until 2026-09-21, so a far end whose near end never
     // connected waited for good, and a hang has no verdict.
     let (stream, peer) = socket::accept_tcp(listener, timeout)?;
-    answer_on(stream, |request| answer(request, peer))
+    answer_on(stream, clock, |request| answer(request, peer))
 }
 
 /// Read the one request a connection already accepted carries, in the
-/// version it opens with, answer it as `answer` says, and report what
-/// `answer` made of it.
+/// version it opens with, its HTTP/2 frames in a span counted on `clock`,
+/// answer it as `answer` says, and report what `answer` made of it.
 ///
 /// For a server whose wait for a connection and whose reads are bounded
 /// apart: a scrape endpoint waits for its scraper as long as it runs, and
@@ -249,14 +264,13 @@ pub fn serve_one_from<T>(
 /// Where the connection broke, sent nothing, or sent a malformed request.
 pub fn answer_on<S: Read + Write, T>(
     mut stream: S,
+    clock: Arc<dyn Clock>,
     answer: impl FnOnce(&Request) -> (T, Response),
 ) -> Result<T> {
     let (h2, first) = sniff(&mut stream)?;
     let mut connection = Replayed::new(first, stream);
     if h2 {
-        // One request, on a connection whose callers hold no Clock: its
-        // frames in a span counted on the operating system's.
-        let mut server = Server::handshake(connection, Box::new(|| SystemClock.monotonic_nanos()))?;
+        let mut server = Server::handshake(connection, Box::new(move || clock.monotonic_nanos()))?;
         let (id, request) = server
             .next_request()?
             .ok_or_else(|| protocol_error("an HTTP/2 connection that sent no request"))?;
@@ -282,6 +296,41 @@ mod tests {
     use super::*;
     use crate::endpoint;
     use net::Endpoint;
+    use net::fixture::pinging::{Pinging, calmed};
+    use net::http2::Limits;
+    use xcore::SystemClock;
+    use xcore::clock::Stepped;
+
+    fn system() -> Arc<dyn Clock> {
+        Arc::new(SystemClock)
+    }
+
+    #[test]
+    fn one_requests_frames_in_a_span_are_counted_on_the_clock_it_was_handed() {
+        // Two runs of three fifths of the PINGs a span allows: each within
+        // its span where a span passed on the clock between them, and the
+        // connection calmed before its request on a clock that never moved.
+        let pings = u64::from(Limits::DEFAULT.control_frames) * 3 / 5;
+        for passed in [true, false] {
+            let clock = Arc::new(Stepped::default());
+            let stepped = Arc::clone(&clock);
+            let mut peer = Pinging::new(
+                pings,
+                Box::new(move || {
+                    if passed {
+                        stepped.pass(Limits::DEFAULT.span);
+                    }
+                }),
+            );
+            let written = peer.written();
+            let handed: Arc<dyn Clock> = clock;
+            let answered = answer_on(&mut peer, handed, |request| {
+                (request.method.clone(), Response::new(200))
+            });
+            assert_eq!(answered.is_ok(), passed, "{passed}: {answered:?}");
+            assert_eq!(calmed(&written), !passed, "{passed}");
+        }
+    }
 
     #[test]
     fn a_secure_scheme_is_refused_naming_its_plain_twin_and_a_plain_one_listens() {
@@ -318,13 +367,13 @@ mod tests {
         let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
         let timeout = Some(Duration::from_secs(2));
         let far_end = std::thread::spawn(move || {
-            let served = serve_one(&listener, timeout, |request| {
+            let served = serve_one(&listener, timeout, system(), |request| {
                 (
                     request.method.clone(),
                     Response::new(201).body(&request.body),
                 )
             });
-            let closed = serve_one(&listener, timeout, |_| ((), Response::new(200)));
+            let closed = serve_one(&listener, timeout, system(), |_| ((), Response::new(200)));
             (served, closed)
         });
         let at = Endpoint::parse(&format!("http://{address}")).expect("parsed");
@@ -343,7 +392,7 @@ mod tests {
         let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
         let timeout = Some(Duration::from_secs(5));
         let far_end = std::thread::spawn(move || {
-            serve_one(&listener, timeout, |request| {
+            serve_one(&listener, timeout, system(), |request| {
                 let answer = Response::new(200)
                     .body(&request.body)
                     .trailer("grpc-status", "0");
