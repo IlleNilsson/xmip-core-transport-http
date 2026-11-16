@@ -22,6 +22,7 @@ use transport::{
 };
 
 use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI};
+use xcore::{Clock, SystemClock};
 
 /// What Xmip answers a caller whose Stream the receive cycle accepted.
 ///
@@ -253,7 +254,9 @@ pub fn answer_on<S: Read + Write, T>(
     let (h2, first) = sniff(&mut stream)?;
     let mut connection = Replayed::new(first, stream);
     if h2 {
-        let mut server = Server::handshake(connection)?;
+        // One request, on a connection whose callers hold no Clock: its
+        // frames in a span counted on the operating system's.
+        let mut server = Server::handshake(connection, Box::new(|| SystemClock.monotonic_nanos()))?;
         let (id, request) = server
             .next_request()?
             .ok_or_else(|| protocol_error("an HTTP/2 connection that sent no request"))?;

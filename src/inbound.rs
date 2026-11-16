@@ -29,6 +29,7 @@ use std::mem;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use xcore::Clock;
 use xcore::lock::Locked;
 
 use net::http::{Request, Response, read_request, write_response};
@@ -75,7 +76,7 @@ impl<T> Heard<T> {
 impl Inbound {
     /// Nothing bound, nothing open.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             serving: Serving::new(),
         }
@@ -88,6 +89,16 @@ impl Inbound {
     pub fn turning_within(self, turn: Duration) -> Self {
         Self {
             serving: self.serving.turning_within(turn),
+        }
+    }
+
+    /// Each caller's turn counted on `clock`, the node's, and an HTTP/2
+    /// caller's frames in a span on it too
+    /// (`transport::serving::Serving::timed_by`).
+    #[must_use]
+    pub fn timed_by(self, clock: &Arc<dyn Clock>) -> Self {
+        Self {
+            serving: self.serving.timed_by(clock),
         }
     }
 
@@ -374,12 +385,13 @@ fn closes(said: Option<&str>) -> bool {
 }
 
 /// The version a connection speaks, told from its first octets, which are
-/// read again.
+/// read again; HTTP/2's spans counted on the Clock its turns are.
 fn heard(mut stream: Within) -> Result<Speaking> {
     let (h2, first) = sniff(&mut stream)?;
+    let now = Box::new(xcore::clock::reading(stream.clock()));
     let connection = Replayed::new(first, stream);
     Ok(if h2 {
-        Speaking::Two(Box::new(Server::handshake(connection)?))
+        Speaking::Two(Box::new(Server::handshake(connection, now)?))
     } else {
         Speaking::One(BufReader::new(connection))
     })
