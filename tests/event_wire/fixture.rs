@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use audit::program_audit::ProgramAudit;
+use audit_file::FileSink;
 use authorize_party::PartyPolicy;
 use event::Event;
 use event::binding::{Carried, Rules};
@@ -47,7 +48,7 @@ pub fn audit_at(name: &str) -> PathBuf {
 }
 
 pub fn subscribed(hub: &Hub, at: &Path) -> EventSubscription {
-    let audit = ProgramAudit::new("xmip-core-transport-http tests", Some(at));
+    let audit = ProgramAudit::new("xmip-core-transport-http tests", Some(FileSink::new(at)));
     hub.subscribe(
         fixture::subscriber(&fixture::party(PARTY), audit),
         Filter::everything(),
