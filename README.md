@@ -53,7 +53,12 @@ answer — so a client that keeps connections lets it go.
 and AS4's origins name. `server::answer_on` does the same on a connection
 already accepted, for a server that bounds its wait for a connection and
 its reads apart — the observe capability's Prometheus scrape endpoint.
-HTTP/3 is open problem 30.
+Each counts an HTTP/2 caller's frames in a span on the Clock its caller
+hands it: a technology's far end the one its transport was timed by
+(`Connections::clock`), a simulated service's session, which is no node's,
+the operating system's (ADR-0068, amendment 2026-11-16); a test floods
+PINGs either side of a span stepped on `xcore::clock::Stepped`
+(`net::fixture::pinging`). HTTP/3 is open problem 30.
 
 A Receive Location keeps what it serves on (`inbound::Inbound`, since
 2026-09-27): its listener, bound on the first receive, and the
@@ -135,7 +140,9 @@ how many were opened, and a test holds a hundred requests to one endpoint
 to one connection, in either version. An HTTP/2 connection counts its
 server's frames in a span on the Clock its `Connections` were handed
 (`Connections::timed_by`, the node's where its transport was built on
-one), the operating system's otherwise. Until 2026-09-27 every request
+one, every technology that sends over them handing on its own from
+`Configured::timed_by`), the operating system's otherwise: the event
+wire's and the OTLP exporter's, which no node hands one yet. Until 2026-09-27 every request
 connected, handshook TLS and said `Connection: close`, and every HTTP/2
 request opened a connection of its own. `endpoint::connect` remains for a
 session that holds its one connection itself: `WebDAV`'s, and a simulated

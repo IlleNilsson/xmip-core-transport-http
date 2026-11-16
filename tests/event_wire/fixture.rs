@@ -20,7 +20,7 @@ use net::http::Response;
 use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
 use xcluster::delivery::subscriber::fixture;
-use xcore::{JourneyId, PartyId};
+use xcore::{JourneyId, PartyId, SystemClock};
 use xmip_core_transport_http::event_wire::{EventWire, HttpEventRules, Webhook, carried};
 use xmip_core_transport_http::server;
 
@@ -86,7 +86,7 @@ pub fn far_end(refusing: u32) -> (String, Receiver<Taken>) {
         let within = Some(Duration::from_secs(10));
         while let Ok((mut stream, _)) = transport::socket::accept_tcp(&listener, within) {
             loop {
-                let served = server::answer_on(&mut stream, |request| {
+                let served = server::answer_on(&mut stream, Arc::new(SystemClock), |request| {
                     let kept = Response::new(503).header("Connection", "keep-alive");
                     if refusing > 0 {
                         refusing -= 1;
