@@ -167,17 +167,6 @@ impl HttpTransport {
         server::listen(&self.bind, &Schemes::HTTP)
     }
 
-    /// Bind the listener every receive takes from now, where no receive
-    /// has, and say where it is: for a far end a sender reaches before it
-    /// receives, which keeps every connection the sender makes.
-    ///
-    /// # Errors
-    ///
-    /// As [`HttpTransport::bind`].
-    pub fn listening(&self) -> Result<&str> {
-        self.inbound.bound(|| self.bind())
-    }
-
     /// Take one request from an already-bound listener and answer it, its
     /// HTTP/2 frames in a span counted on the Clock the transport was timed
     /// by.
@@ -212,18 +201,17 @@ impl Transport for HttpTransport {
     }
 
     /// The next request from whichever caller sends first, on the
-    /// listener bound by the first receive and kept. The caller waits for
+    /// listener bound as the transport was opened (`Configured::listening`)
+    /// and kept. The caller waits for
     /// the verdict (`server::status`): `202 Accepted` once the receive
     /// cycle accepted the body; `401`, `403` or `422` where it refused it,
     /// by why, so the caller does not send it again unchanged; `503 Service
     /// Unavailable` where Xmip could not complete the cycle, so the caller
     /// sends it again. The body is read whole, within `net::MAX_BODY`.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        let ((request, peer), reply) = self.inbound.next(
-            || self.bind(),
-            self.timeout,
-            |request, peer| Heard::Waiting((request, peer)),
-        )?;
+        let ((request, peer), reply) = self.inbound.next(self.timeout, |request, peer| {
+            Heard::Waiting((request, peer))
+        })?;
         let reply =
             reply.ok_or_else(|| transport::error::protocol_error("a request answered unheard"))?;
         Ok(vec![server::arrived(
@@ -356,6 +344,12 @@ impl Configured for HttpTransport {
         self.connections = self.connections.timed_by(clock);
         self
     }
+
+    /// The listener every receive takes from, bound at the address the
+    /// Location was entered with ([`HttpTransport::bind`]), and where it is.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.inbound.bound(|| self.bind()).map(Some)
+    }
 }
 
 impl HttpTransport {
@@ -433,6 +427,27 @@ mod tests {
     }
 
     #[test]
+    fn a_receive_location_listens_once_opened_and_a_taken_port_refuses_it() {
+        // The owner, 2026-11-16, *Bind at open*: built, it binds nothing;
+        // opened to listen, a caller's first connect is taken.
+        let entered = "http://127.0.0.1:0/orders";
+        let receiver = HttpTransport::open(entered, Applies::Receive, &[]).expect("built");
+        assert_eq!(receiver.inbound.address(), None, "building binds nothing");
+        let address = receiver
+            .listening()
+            .expect("bound")
+            .expect("listens")
+            .to_string();
+        drop(std::net::TcpStream::connect(&address).expect("taken on its first connect"));
+        let again = format!("http://{address}/orders");
+        let taken = HttpTransport::open(&again, Applies::Receive, &[]).expect("built");
+        let refused = taken.listening().expect_err("another holds it");
+        let port = address.rsplit_once(':').expect("a port").1;
+        let named = format!("binding the listener at {address}: port {port} is taken");
+        assert!(refused.message.starts_with(&named), "{refused}");
+    }
+
+    #[test]
     fn http_round_trip_carries_the_body_and_the_path() {
         let receiver = HttpTransport::new("127.0.0.1:0");
         let (listener, address) = receiver.bind().expect("binding");
@@ -458,7 +473,7 @@ mod tests {
         // nothing listening at the address its first had reached.
         const ROUNDS: usize = 10;
         let receiver = HttpTransport::loopback();
-        let address = receiver.listening().expect("bound");
+        let address = receiver.listening().expect("bound").expect("listens");
         let target = format!("http://{address}/orders");
         let sender = std::thread::spawn(move || {
             let sender = HttpTransport::loopback();
@@ -486,7 +501,7 @@ mod tests {
     fn a_received_request_carries_its_peer_method_target_query_and_headers() {
         use context::property::{HTTP_METHOD, HTTP_QUERY_PREFIX, HTTP_URI, PEER_ADDRESS};
         let receiver = HttpTransport::loopback();
-        let address = receiver.listening().expect("bound");
+        let address = receiver.listening().expect("bound").expect("listens");
         let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
         let caller = std::thread::spawn(move || {
             let request = Request::new("POST", at.path())
@@ -535,7 +550,7 @@ mod tests {
     fn a_failed_cycle_answers_503_a_refused_one_4xx_by_why_and_an_accepted_one_202() {
         use transport::Refusal;
         let receiver = HttpTransport::loopback();
-        let address = receiver.listening().expect("bound");
+        let address = receiver.listening().expect("bound").expect("listens");
         let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
         let caller = std::thread::spawn(move || {
             let connections = Connections::new();
@@ -616,7 +631,11 @@ mod tests {
         let password = Kept::drawn();
         kept.set("partner-x.http", xcore::SecretKind::Password, &password);
         let receiver = HttpTransport::loopback();
-        let address = receiver.listening().expect("bound").to_string();
+        let address = receiver
+            .listening()
+            .expect("bound")
+            .expect("listens")
+            .to_string();
         let sender = HttpTransport::loopback()
             .secured_by(kept.secured("partner-x.http"))
             .expect("kept");

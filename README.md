@@ -61,8 +61,11 @@ PINGs either side of a span stepped on `xcore::clock::Stepped`
 (`net::fixture::pinging`). HTTP/3 is open problem 30.
 
 A Receive Location keeps what it serves on (`inbound::Inbound`, since
-2026-09-27): its listener, bound on the first receive, and the
-connections its callers keep, on the capability's `serving::Serving`.
+2026-09-27): its listener, bound as its transport is opened
+(`Configured::listening`, which the runtime calls at startup phase 9, so
+a node listens when it says it started and a port that is taken refuses
+its start; on its first receive until 2026-11-16), and the connections
+its callers keep, on the capability's `serving::Serving`.
 Each receive takes the next request from whichever caller sends first —
 HTTP/1.1 answered `Connection: keep-alive` unless the request said
 `close`, HTTP/2 stream after stream on one connection, a pipelined

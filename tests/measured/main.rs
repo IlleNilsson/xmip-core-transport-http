@@ -29,8 +29,8 @@ use net::Endpoint;
 use net::http::Request;
 use resilience::Guard;
 use retry::Retry;
-use transport::Transport;
 use transport::socket;
+use transport::{Configured, Transport};
 use xcluster::delivery::forward::Forwarder;
 use xcore::latency::{Rounds, spin, spread};
 use xcore::processor_time::ProcessorTime;
@@ -90,7 +90,7 @@ fn a_request_answered_after_its_verdict_takes_under_a_millisecond() {
     // reply kept beside its connection and written after, included.
     const ROUNDS: u32 = 500;
     let receiver = HttpTransport::loopback();
-    let address = receiver.listening().expect("bound");
+    let address = receiver.listening().expect("bound").expect("listens");
     let target = format!("http://{address}/orders");
     let sender = thread::spawn(move || {
         let sender = HttpTransport::loopback();
