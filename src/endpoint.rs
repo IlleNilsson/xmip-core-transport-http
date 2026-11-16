@@ -26,7 +26,10 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::Duration;
+
+use xcore::{Clock, SystemClock};
 
 use net::Endpoint;
 use net::http::{Request, Response, Version};
@@ -159,10 +162,22 @@ type Key = (bool, String, Offer);
 /// of it and every client it hands them to. One the far end closed
 /// meanwhile — an idle timeout, a `GOAWAY`, a restart — fails on reuse,
 /// and the request goes again on a new connection, as the pool does for
-/// every session.
-#[derive(Clone, Default)]
+/// every session. An HTTP/2 connection counts its server's frames in a span
+/// on the Clock these were handed ([`Connections::timed_by`]), the
+/// operating system's until then.
+#[derive(Clone)]
 pub struct Connections {
     pool: Pool<Kept, Key>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Default for Connections {
+    fn default() -> Self {
+        Self {
+            pool: Pool::default(),
+            clock: Arc::new(SystemClock),
+        }
+    }
 }
 
 impl Connections {
@@ -170,6 +185,13 @@ impl Connections {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// These, an HTTP/2 connection's spans counted on `clock`, the node's.
+    #[must_use]
+    pub fn timed_by(mut self, clock: &Arc<dyn Clock>) -> Self {
+        self.clock = Arc::clone(clock);
+        self
     }
 
     /// Send `request` to `endpoint` on a connection kept to it, or on a new
@@ -188,7 +210,7 @@ impl Connections {
         let key = (endpoint.secure(), endpoint.address(), offer);
         self.pool.exchange(
             &key,
-            || kept(endpoint, timeout, offer),
+            || kept(endpoint, (timeout, offer), &self.clock),
             |kept| exchange_on(kept, request),
         )
     }
@@ -201,8 +223,14 @@ impl Connections {
     }
 }
 
-/// A new connection to `endpoint`, handshaken where it speaks HTTP/2.
-fn kept(endpoint: &Endpoint, timeout: Option<Duration>, offer: Offer) -> Result<Kept> {
+/// A new connection to `endpoint`, opened within `timeout` offering
+/// `offer`, handshaken where it speaks HTTP/2, its spans counted on
+/// `clock`.
+fn kept(
+    endpoint: &Endpoint,
+    (timeout, offer): (Option<Duration>, Offer),
+    clock: &Arc<dyn Clock>,
+) -> Result<Kept> {
     let Opened {
         connection,
         version,
@@ -215,7 +243,8 @@ fn kept(endpoint: &Endpoint, timeout: Option<Duration>, offer: Offer) -> Result<
         },
         Version::Http2 => {
             let scheme = if endpoint.secure() { "https" } else { "http" };
-            Speaking::Http2(Box::new(Client::handshake(connection, scheme)?))
+            let now = Box::new(xcore::clock::reading(clock));
+            Speaking::Http2(Box::new(Client::handshake(connection, scheme, now)?))
         }
     };
     Ok(Kept { speaking, socket })

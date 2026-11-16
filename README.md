@@ -104,7 +104,10 @@ at most the node's `[tuning] receive_turn`, a minute by default
 (`Inbound::turning_within`), every read of it waiting only what is left:
 a head sent in part and never ended, or a body a byte at a time, is cut
 at its turn and its caller turned away (ADR-0018, amendment 2026-11-14).
-Every technology riding on HTTP hands its `Inbound` the node's span. The
+Every technology riding on HTTP hands its `Inbound` the node's span, and
+the node's Clock the turn is counted on (`Inbound::timed_by`, from
+`Configured::timed_by`; ADR-0068, amendment 2026-11-15), which an HTTP/2
+caller's frames in a span are counted on too. The
 request body is read whole by `net::http`, within `net::MAX_BODY`, and
 handed to the runtime as a reader over it.
 
@@ -129,7 +132,10 @@ so a server gone for good holds no socket here. Until 2026-09-29 a
 connection to a WebDAV far end at a new port every round was kept in
 `CLOSE_WAIT` for good. `Connections::opened` says
 how many were opened, and a test holds a hundred requests to one endpoint
-to one connection, in either version. Until 2026-09-27 every request
+to one connection, in either version. An HTTP/2 connection counts its
+server's frames in a span on the Clock its `Connections` were handed
+(`Connections::timed_by`, the node's where its transport was built on
+one), the operating system's otherwise. Until 2026-09-27 every request
 connected, handshook TLS and said `Connection: close`, and every HTTP/2
 request opened a connection of its own. `endpoint::connect` remains for a
 session that holds its one connection itself: `WebDAV`'s, and a simulated

@@ -345,6 +345,14 @@ impl Configured for HttpTransport {
         self.inbound = self.inbound.turning_within(turn);
         self
     }
+
+    /// Each caller's turn, and an HTTP/2 peer's frames in a span, both
+    /// ways, counted on `clock`.
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.inbound = self.inbound.timed_by(clock);
+        self.connections = self.connections.timed_by(clock);
+        self
+    }
 }
 
 impl HttpTransport {

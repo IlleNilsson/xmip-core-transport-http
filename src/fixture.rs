@@ -24,8 +24,9 @@ pub fn keeping(listener: &TcpListener, connections: usize) -> (usize, usize) {
         let (h2, first) = net::http2::sniff(&mut &stream).expect("sniffed");
         let replayed = net::http2::Replayed::new(first, &stream);
         if h2 {
-            // Served until the near end lets the connection go.
-            let _ = net::http2::serve(replayed, |_| {
+            // Served until the near end lets the connection go, on a
+            // clock that never moves: no span of its frames ends.
+            let _ = net::http2::serve(replayed, Box::new(|| 0), |_| {
                 answered += 1;
                 Response::new(204)
             });
