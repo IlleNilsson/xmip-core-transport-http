@@ -1,7 +1,8 @@
 //! What an HTTP Receive Location keeps between its receives: its listener,
-//! bound on the first, and the connections its callers keep open, each
-//! request answered in the version it speaks — once its receive cycle has
-//! ended.
+//! bound as its transport is opened (`Configured::listening`; the owner,
+//! 2026-11-16, *Bind at open*), and the connections its callers keep open,
+//! each request answered in the version it speaks — once its receive cycle
+//! has ended.
 //!
 //! Every sender keeps its connection between requests (`endpoint`), and
 //! until 2026-09-27 a Receive Location bound a new listener for every
@@ -111,35 +112,35 @@ impl Inbound {
     /// The next request from whichever caller sends first within `timeout`
     /// (`None` waits as long as it takes), what `hear` made of it, and the
     /// [`Reply`] its caller waits on where `hear` said
-    /// [`Heard::Waiting`]. The listener is bound by `bind` on the first
-    /// call and kept. `hear` is handed the caller's address, which an
-    /// origin names.
+    /// [`Heard::Waiting`], on the listener [`Inbound::bound`] bound as the
+    /// transport was opened. `hear` is handed the caller's address, which
+    /// an origin names.
     ///
     /// A caller whose connection broke or carried a malformed request is
     /// let go and turned away ([`Inbound::turned_away`]), and the wait goes
     /// on for the others.
     ///
     /// # Errors
-    /// Where the listener could not be bound, waited on or accepted from,
-    /// or nothing arrived within `timeout`.
+    /// Where nothing is bound, the listener could not be waited on or
+    /// accepted from, or nothing arrived within `timeout`.
     pub fn next<T>(
         &self,
-        bind: impl FnOnce() -> Result<(TcpListener, String)>,
         timeout: Option<Duration>,
         mut hear: impl FnMut(Request, SocketAddr) -> Heard<T>,
     ) -> Result<(T, Option<Reply>)> {
         self.serving
-            .next(bind, timeout, Caller::new, |caller| caller.turn(&mut hear))
+            .next(timeout, Caller::new, |caller| caller.turn(&mut hear))
     }
 
-    /// Where the listener is bound: `None` before the first receive.
+    /// Where the listener is bound: `None` until it is.
     #[must_use]
     pub fn address(&self) -> Option<&str> {
         self.serving.address()
     }
 
-    /// Bind the listener by `bind` now, where no receive has, and say
-    /// where it is.
+    /// Bind the listener by `bind` now, where it is not yet, and say where
+    /// it is: what each technology receiving through this calls in its
+    /// `Configured::listening`.
     ///
     /// # Errors
     /// As `bind`.
@@ -414,8 +415,7 @@ mod tests {
 
     /// The next request, answered `202`.
     fn accepted(inbound: &Inbound) -> Result<(Vec<u8>, SocketAddr)> {
-        let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
-        let (taken, reply) = inbound.next(unbound, WAIT, waiting)?;
+        let (taken, reply) = inbound.next(WAIT, waiting)?;
         reply.expect("waiting").answer(&Response::new(202))?;
         Ok(taken)
     }
@@ -425,8 +425,7 @@ mod tests {
             binds.fetch_add(1, Ordering::SeqCst);
             socket::bind_tcp("127.0.0.1:0")
         };
-        drop(inbound.next(bind, Some(Duration::from_millis(1)), waiting));
-        inbound.address().expect("bound").to_string()
+        inbound.bound(bind).expect("bound").to_string()
     }
 
     fn post(at: &Endpoint, body: &[u8]) -> Request {
@@ -495,8 +494,7 @@ mod tests {
                     .expect("answered");
                 (first.status, second.status)
             });
-            let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
-            let (one, reply) = inbound.next(unbound, WAIT, waiting).expect("one");
+            let (one, reply) = inbound.next(WAIT, waiting).expect("one");
             assert_eq!(one.0, b"one");
             assert!(!caller.is_finished(), "nothing answered before the verdict");
             reply
@@ -520,9 +518,8 @@ mod tests {
                 .expect("answered")
                 .status
         });
-        let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
         let (said, reply) = inbound
-            .next(unbound, WAIT, |request, _| {
+            .next(WAIT, |request, _| {
                 Heard::Answered(request.body, Response::new(200))
             })
             .expect("heard");
@@ -606,7 +603,6 @@ mod tests {
                 .expect("answered");
             (refused.status, refused.body, next.status)
         });
-        let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
         let hear = |request: Request, peer| {
             if request.body == b"not ours" {
                 let why = TransportError::permanent("not this technology's message");
@@ -614,7 +610,7 @@ mod tests {
             }
             waiting(request, peer)
         };
-        let (taken, reply) = inbound.next(unbound, WAIT, hear).expect("the next caller");
+        let (taken, reply) = inbound.next(WAIT, hear).expect("the next caller");
         assert_eq!(taken.0, b"ours");
         reply
             .expect("waiting")
@@ -641,8 +637,7 @@ mod tests {
         let stream = endpoint::connect(&at, WAIT).expect("connect");
         let request = post(&at, b"dropped");
         let caller = std::thread::spawn(move || net::http::exchange(stream, &request));
-        let unbound = || -> Result<(TcpListener, String)> { panic!("bound twice") };
-        let (_, reply) = inbound.next(unbound, WAIT, waiting).expect("taken");
+        let (_, reply) = inbound.next(WAIT, waiting).expect("taken");
         drop(reply);
         assert!(caller.join().expect("caller").is_err(), "let go unanswered");
     }
@@ -694,11 +689,7 @@ mod tests {
         assert_eq!(inbound.open(), 0, "the caller said close");
         drop(endpoint::connect(&at, WAIT).expect("a poke"));
         let error = inbound
-            .next(
-                || panic!("bound twice"),
-                Some(Duration::from_millis(200)),
-                waiting,
-            )
+            .next(Some(Duration::from_millis(200)), waiting)
             .expect_err("nothing but a poke");
         assert!(
             error.retryable,
