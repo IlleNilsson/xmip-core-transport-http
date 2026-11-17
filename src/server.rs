@@ -214,7 +214,7 @@ pub fn accept_one(
 /// `clock`, answer it as `answer` says, and report what `answer` made of
 /// it.
 ///
-/// The far end every REST technology runs on loopback — s3, azure-blob,
+/// The far end every REST technology runs on loopback — aws-s3, azure-blob,
 /// google-pub-sub and seven more — accepted, split, read, answered and
 /// wrote these same lines each until 2026-09-14. What a session does with a
 /// request stays in the technology; taking one off a connection is HTTP's
