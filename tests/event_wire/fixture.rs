@@ -21,7 +21,7 @@ use net::http::Response;
 use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
 use xcluster::delivery::subscriber::fixture;
-use xcore::{JourneyId, PartyId, SystemClock};
+use xcore::{Clock, JourneyId, PartyId, SystemClock};
 use xmip_core_transport_http::event_wire::{EventWire, HttpEventRules, Webhook, carried};
 use xmip_core_transport_http::server;
 
@@ -113,12 +113,15 @@ pub fn far_end(refusing: u32) -> (String, Receiver<Taken>) {
     (address, told)
 }
 
+/// The wire to the far end at `address`, on the operating system's Clock:
+/// these tests' wire is no node's.
 pub fn wire(address: &str, h2c: bool) -> EventWire {
     let webhook = Webhook::new(&format!("http://{address}/hooks/xmip?source=node-n"))
         .expect("a URL")
         .presenting_bearer(TOKEN);
     let webhook = if h2c { webhook.speaking_h2c() } else { webhook };
-    EventWire::new()
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    EventWire::new(&clock)
         .to(PARTY, webhook)
         .timing_out_after(TIMEOUT)
 }
