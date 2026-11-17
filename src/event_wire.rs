@@ -34,10 +34,13 @@
 //! connect — which on loopback is half of it. A webhook that answers
 //! `Connection: close` is connected to afresh next time; one that closed a
 //! kept connection meanwhile is connected to afresh at once, the event
-//! sent again: at least once.
+//! sent again: at least once. An HTTP/2 webhook's frames in a span are
+//! counted on the Clock the wire is made with, the node's (ADR-0068,
+//! amendment 2026-11-17).
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use codec::percent::{decode_strict, encode_keeping};
@@ -47,8 +50,7 @@ use event::wire::Wire;
 use net::Endpoint;
 use net::http::Request;
 use transport::error::Result;
-use xcore::Failure;
-use xcore::PartyId;
+use xcore::{Clock, Failure, PartyId};
 
 use crate::endpoint::{Connections, Offer};
 use crate::status;
@@ -162,13 +164,14 @@ pub struct EventWire {
 }
 
 impl EventWire {
-    /// A wire configured for no Party yet.
+    /// A wire configured for no Party yet, an HTTP/2 webhook's frames in a
+    /// span counted on `clock`, the node's.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(clock: &Arc<dyn Clock>) -> Self {
         Self {
             webhooks: BTreeMap::new(),
             timeout: None,
-            connections: Connections::new(),
+            connections: Connections::new().timed_by(clock),
         }
     }
 
@@ -185,12 +188,6 @@ impl EventWire {
     pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
-    }
-}
-
-impl Default for EventWire {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -240,7 +237,16 @@ pub fn carried(request: &Request) -> Carried {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use net::fixture::pinging::answering;
     use net::http::Response;
+    use net::http2::Limits;
+    use xcore::clock::Stepped;
+
+    /// The operating system's Clock: a wire's and a webhook's that no test
+    /// steps, as no node's.
+    fn system() -> Arc<dyn Clock> {
+        Arc::new(xcore::SystemClock)
+    }
 
     #[test]
     fn a_carried_event_is_its_request_and_its_request_the_carried_event() {
@@ -273,8 +279,7 @@ mod tests {
         let far_end = std::thread::spawn(move || {
             (0..2)
                 .map(|_| {
-                    let clock = std::sync::Arc::new(xcore::SystemClock);
-                    crate::server::serve_one(&listener, timeout, clock, |request| {
+                    crate::server::serve_one(&listener, timeout, system(), |request| {
                         let kept = Response::new(202).header("Connection", "keep-alive");
                         (request.body.clone(), kept)
                     })
@@ -282,7 +287,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         let webhook = Webhook::new(&format!("http://{address}/hook")).expect("a URL");
-        let wire = EventWire::new()
+        let wire = EventWire::new(&system())
             .to(PartyId::new(1), webhook)
             .timing_out_after(Duration::from_secs(2));
         for body in [b"one", b"two"] {
@@ -300,7 +305,7 @@ mod tests {
     #[test]
     fn a_party_with_no_webhook_is_refused_for_good_and_an_unreachable_one_is_retried() {
         let webhook = Webhook::new("http://127.0.0.1:1/hook").expect("a URL");
-        let wire = EventWire::new()
+        let wire = EventWire::new(&system())
             .to(PartyId::new(1), webhook)
             .timing_out_after(Duration::from_secs(1));
         let refused = wire
@@ -313,5 +318,50 @@ mod tests {
             .expect_err("nothing listens");
         assert!(unreachable.retryable, "{unreachable}");
         assert!(Webhook::new("hook.example/x").is_err(), "not HTTP");
+    }
+
+    #[test]
+    fn a_webhook_s_frames_in_a_span_are_counted_on_the_clock_the_wire_was_made_with() {
+        // A webhook speaking HTTP/2 sends two runs of three fifths of the
+        // PINGs a span allows while the event waits for its answer:
+        // carried where a span passed on the clock between them, and
+        // refused, the connection calmed, on a clock that never moved.
+        let pings = u64::from(Limits::DEFAULT.control_frames) * 3 / 5;
+        let timeout = Some(Duration::from_secs(5));
+        for passed in [true, false] {
+            let clock = Arc::new(Stepped::default());
+            let stepped = Arc::clone(&clock);
+            let (listener, address) = transport::socket::bind_tcp("127.0.0.1:0").expect("bind");
+            let far_end = std::thread::spawn(move || {
+                let (stream, _) = transport::socket::accept_tcp(&listener, timeout).expect("one");
+                stream.set_read_timeout(timeout).expect("a bound read");
+                let between = move || {
+                    if passed {
+                        stepped.pass(Limits::DEFAULT.span);
+                    }
+                };
+                answering(stream, pings, Box::new(between));
+            });
+            let webhook = Webhook::new(&format!("http://{address}/hook"))
+                .expect("a URL")
+                .speaking_h2c();
+            let handed: Arc<dyn Clock> = clock;
+            let wire = EventWire::new(&handed)
+                .to(PartyId::new(1), webhook)
+                .timing_out_after(Duration::from_secs(5));
+            let carried = Carried {
+                body: b"one".to_vec(),
+                ..Carried::default()
+            };
+            let answered = wire.carry(PartyId::new(1), &carried);
+            drop(wire);
+            far_end.join().expect("far end");
+
+            assert_eq!(answered.is_ok(), passed, "{passed}: {answered:?}");
+            let calmed = answered
+                .err()
+                .is_some_and(|why| why.message.contains("PING and SETTINGS frames"));
+            assert_eq!(calmed, !passed, "{passed}");
+        }
     }
 }

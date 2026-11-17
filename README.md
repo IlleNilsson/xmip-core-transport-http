@@ -144,8 +144,9 @@ to one connection, in either version. An HTTP/2 connection counts its
 server's frames in a span on the Clock its `Connections` were handed
 (`Connections::timed_by`, the node's where its transport was built on
 one, every technology that sends over them handing on its own from
-`Configured::timed_by`), the operating system's otherwise: the event
-wire's and the OTLP exporter's, which no node hands one yet. Until 2026-09-27 every request
+`Configured::timed_by`; the event wire and the OTLP exporter the one they
+are made with, `EventWire::new` and `Exporter::start`, since 2026-11-17),
+the operating system's otherwise. Until 2026-09-27 every request
 connected, handshook TLS and said `Connection: close`, and every HTTP/2
 request opened a connection of its own. `endpoint::connect` remains for a
 session that holds its one connection itself: `WebDAV`'s, and a simulated
@@ -170,7 +171,12 @@ attempt: at least once. The identity presented is the bearer token
 configured for the Party (ADR-0019 clause 3); a client certificate waits on
 the estate's TLS offering a client identity. The connection to a webhook is
 kept open between events, in either version, so an event costs one exchange
-rather than a connect. `event_wire::carried` is the read side: a request a
+rather than a connect. The wire is made with the node's Clock
+(`EventWire::new(clock)`; ADR-0068, amendment 2026-11-17), which an HTTP/2
+webhook's frames in a span are counted on, and has no default: a test steps
+`xcore::clock::Stepped` past the span while the webhook floods `PING`s
+either side of it (`net::fixture::pinging::answering`), and sleeps for
+nothing. `event_wire::carried` is the read side: a request a
 receiving Xmip took, as `HttpEventRules` reads a `WireEvent` from.
 
 Near, very near real time: the module's timing program, `tests/measured`
