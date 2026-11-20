@@ -76,16 +76,16 @@ xcluster = { package = "xmip-core-cluster", git = "https://github.com/IlleNilsso
 # The processor time an Event's threads used, which the tests hold, and the
 # Clock a test steps (`xcore::clock::Stepped`).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main", features = ["test-support"] }
-# A test's own temporary folder (`file::temporary`); for the tests only.
-file = { package = "xmip-core-library-file", git = "https://github.com/IlleNilsson/xmip-core-library-file", branch = "main", features = ["test-support"] }
 # The HTTP/2 peer that floods PINGs either side of a span, which one
 # request off a connection is held to (`net::fixture::pinging`).
 net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main", features = ["test-support"] }
 # The forwarding tests: a subscriber's audit, the stage an Event reports,
 # and one real retry guard.
 audit = { package = "xmip-core-audit", git = "https://github.com/IlleNilsson/xmip-core-audit", branch = "main" }
-# The sink that audit keeps its records in, read back from the file.
-audit-file = { package = "xmip-core-audit-file", git = "https://github.com/IlleNilsson/xmip-core-audit-file", branch = "main" }
+# The sink that audit keeps its records in, read back from the file, and
+# the test's own folder it writes in, removed once audit's keeper kept them
+# (`audit_file::temporary`).
+audit-file = { package = "xmip-core-audit-file", git = "https://github.com/IlleNilsson/xmip-core-audit-file", branch = "main", features = ["test-support"] }
 node = { package = "xmip-core-node", git = "https://github.com/IlleNilsson/xmip-core-node", branch = "main" }
 # The guard the event-wire tests judge an attempt by (`resilience::Guard`);
 # the library itself uses none of the capability (unused_dependencies).
