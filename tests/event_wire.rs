@@ -94,7 +94,7 @@ fn an_http_header_is_percent_encoded_as_the_binding_says() {
 
 #[test]
 fn a_published_event_arrives_as_the_same_event_in_either_mode_and_version() {
-    let at = audit_at("modes");
+    let (_folder, at) = audit_at("modes");
     for (mode, h2c) in [
         (Mode::Structured, false),
         (Mode::Binary, false),
@@ -129,7 +129,7 @@ fn a_published_event_arrives_as_the_same_event_in_either_mode_and_version() {
 
 #[test]
 fn a_webhook_that_answers_503_is_retried_and_the_events_arrive_in_order() {
-    let at = audit_at("again");
+    let (_folder, at) = audit_at("again");
     let hub = allowing();
     let (address, told) = far_end(2);
     let subscription = subscribed(&hub, &at);

@@ -2,7 +2,6 @@
 //! hub and token, its subscription and Event, the webhook that admits it
 //! and the wire that reaches it.
 
-use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +16,7 @@ use event::Event;
 use event::binding::{Carried, Rules};
 use event::filter::Filter;
 use event::outcome::Outcome;
+use file::temporary::Folder;
 use net::http::Response;
 use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
@@ -39,12 +39,12 @@ pub const TOKEN: &str = "presented-for-party-23";
 
 pub const TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A temporary audit directory of its own, never empty and never the
-/// estate's.
-pub fn audit_at(name: &str) -> PathBuf {
-    let at = std::env::temp_dir().join(format!("xmip-http-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&at);
-    at
+/// A temporary audit directory of its own, not made yet and never the
+/// estate's, in a folder removed when the test ends.
+pub fn audit_at(name: &str) -> (Folder, PathBuf) {
+    let folder = Folder::new(&format!("http-{name}"));
+    let at = folder.join("audit");
+    (folder, at)
 }
 
 pub fn subscribed(hub: &Hub, at: &Path) -> EventSubscription {
