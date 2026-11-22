@@ -24,7 +24,7 @@
 //! and every HTTP/2 request opened a connection of its own, preface and
 //! settings included.
 
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,9 +131,10 @@ struct Kept {
 
 /// What a kept connection speaks.
 enum Speaking {
-    /// HTTP/1.1, and whether its last answer left it open for the next.
+    /// HTTP/1.1, read through the one reader it keeps for its life, and
+    /// whether its last answer left it open for the next.
     Http11 {
-        connection: Box<dyn Connection>,
+        connection: BufReader<Box<dyn Connection>>,
         open: bool,
     },
     Http2(Box<Client<Box<dyn Connection>>>),
@@ -143,10 +144,13 @@ impl Pooled for Kept {
     /// Not where the last answer said `Connection: close` or ended with the
     /// connection, nor where the server said `GOAWAY`, nor where the server
     /// has closed the socket meanwhile. An HTTP/1.1 server speaks only when
-    /// asked, so anything it sent to an idle connection lets it go too.
+    /// asked, so anything it sent to an idle connection lets it go too,
+    /// read already or not.
     fn usable(&mut self) -> bool {
         match &self.speaking {
-            Speaking::Http11 { open, .. } => *open && quiet(&self.socket),
+            Speaking::Http11 { open, connection } => {
+                *open && connection.buffer().is_empty() && quiet(&self.socket)
+            }
             Speaking::Http2(client) => !client.going_away() && alive(&self.socket),
         }
     }
@@ -246,7 +250,7 @@ fn kept(
     } = open(endpoint, timeout, offer)?;
     let speaking = match version {
         Version::Http11 => Speaking::Http11 {
-            connection,
+            connection: BufReader::new(connection),
             open: true,
         },
         Version::Http2 => {
@@ -305,7 +309,6 @@ mod tests {
     use super::*;
     use crate::fixture::keeping;
     use std::assert_matches;
-    use std::io::BufReader;
 
     #[test]
     fn an_https_endpoint_without_tls_says_so() {
@@ -438,6 +441,40 @@ mod tests {
             assert_eq!(answer.body, body);
         }
         assert_eq!(connections.opened(), 2);
+        far_end.join().expect("far end");
+    }
+
+    #[test]
+    fn an_interim_answer_sent_with_the_final_one_leaves_the_kept_connection_whole() {
+        // Until 2026-11-22 the 100 was taken for the answer and the 200
+        // read by the next request, as its own.
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let far_end = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(&stream);
+            for _ in 0..2 {
+                let request = net::http::read_request(&mut reader)
+                    .expect("read")
+                    .expect("one");
+                let mut both = b"HTTP/1.1 100 Continue\r\n\r\n".to_vec();
+                let kept = Response::new(200).header("Connection", "keep-alive");
+                net::http::write_response(&mut both, &kept.body(&request.body)).expect("w");
+                (&stream).write_all(&both).expect("both at once");
+            }
+        });
+        let endpoint = Endpoint::parse(&format!("http://{address}/hook")).expect("url");
+        let connections = Connections::new();
+        for body in [&b"one"[..], b"two"] {
+            let request = Request::new("POST", "/hook")
+                .header("Host", &address)
+                .body(body);
+            let timeout = Some(Duration::from_secs(5));
+            let answer = connections
+                .exchange(&endpoint, timeout, Offer::Http11, &request)
+                .expect("answered");
+            assert_eq!((answer.status, answer.body.as_slice()), (200, body));
+        }
+        assert_eq!(connections.opened(), 1);
         far_end.join().expect("far end");
     }
 }

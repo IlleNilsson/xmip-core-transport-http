@@ -33,7 +33,7 @@ use std::time::Duration;
 use xcore::Clock;
 use xcore::lock::Locked;
 
-use net::http::{Request, Response, read_request, write_response};
+use net::http::{Request, Response, read_request_or_refuse, write_response};
 use net::http2::{Replayed, Server, sniff};
 use transport::answer::{Answer, Busy};
 use transport::deadline::Within;
@@ -116,9 +116,9 @@ impl Inbound {
     /// transport was opened. `hear` is handed the caller's address, which
     /// an origin names.
     ///
-    /// A caller whose connection broke or carried a malformed request is
-    /// let go and turned away ([`Inbound::turned_away`]), and the wait goes
-    /// on for the others.
+    /// A caller whose connection broke or carried a malformed request, the
+    /// request answered `400`, is let go and turned away
+    /// ([`Inbound::turned_away`]), and the wait goes on for the others.
     ///
     /// # Errors
     /// Where nothing is bound, the listener could not be waited on or
@@ -327,7 +327,7 @@ impl Caller {
         }
         let Line { speaking, more } = &mut *line;
         let (request, stream) = match speaking {
-            Speaking::One(reader) => match read_request(reader)? {
+            Speaking::One(reader) => match read_request_or_refuse(reader)? {
                 Some(request) => (request, None),
                 None => return Ok(Turn::Closed),
             },
@@ -626,6 +626,37 @@ mod tests {
             turned.callers[0].why.message,
             "not this technology's message"
         );
+    }
+
+    #[test]
+    fn a_request_two_readers_can_frame_apart_is_answered_400_and_the_next_caller_served() {
+        // Until 2026-11-22 the chunked framing won over the length beside
+        // it, and the caller was let go without an answer.
+        let inbound = Inbound::new();
+        let binds = AtomicUsize::new(0);
+        let address = bound(&inbound, &binds);
+        let at = Endpoint::parse(&format!("http://{address}/orders")).expect("parsed");
+        let mut smuggling = std::net::TcpStream::connect(&address).expect("connect");
+        smuggling.set_read_timeout(WAIT).expect("a bounded wait");
+        let from = smuggling.local_addr().expect("its address");
+        let callers = std::thread::spawn(move || {
+            let apart = b"POST /orders HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\
+                Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\n\r\n";
+            std::io::Write::write_all(&mut smuggling, apart).expect("sent");
+            let refused = net::http::read_response(&mut std::io::BufReader::new(&smuggling))
+                .expect("answered");
+            let next = Connections::new()
+                .exchange(&at, WAIT, Offer::Http11, &post(&at, b"after"))
+                .expect("answered");
+            let closes = refused.header_value("connection").map(str::to_string);
+            (refused.status, closes, next.status)
+        });
+        assert_eq!(accepted(&inbound).expect("the next caller").0, b"after");
+        let said = callers.join().expect("callers");
+        assert_eq!(said, (400, Some("close".to_string()), 202));
+        let turned = inbound.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(turned.callers[0].peer, from);
     }
 
     #[test]
