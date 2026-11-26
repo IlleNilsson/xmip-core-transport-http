@@ -193,6 +193,10 @@ program both stand up, `fixture::keeping`, is written once, behind the
 
 A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier in the `Idempotency-Key` header of draft-ietf-httpapi-idempotency-key-header, written as the Structured Field string it defines: `Idempotency-Key: "<key>"` (`IDEMPOTENCY_KEY`, `idempotency_key`). Every attempt on one Journey carries the same key, so a server that honors the header answers a repeated POST with the first one's outcome rather than act on it twice; a server that does not ignores it. An unkeyed `send` carries no such header.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `h2c` and `timeout`, and `SCHEMES`, `http` and `https`, which was the crate's own `SCHEMES` until then. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on are behind the default feature, and `tls` and `test-support`, which are code, turn the default on with them. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check an HTTP Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. A technology riding on HTTP takes http as a dependency of its code alone, so its own declaration builds none of HTTP's. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

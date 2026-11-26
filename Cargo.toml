@@ -15,7 +15,8 @@ path = "src/lib.rs"
 # (repository-model.md). The Transport trait, Arrived, Directions, the error
 # vocabulary and the line-oriented wire helpers live there. Standard library
 # otherwise, which is what lets this build on every target in
-# deployment-model.md without a cross-compilation story.
+# deployment-model.md without a cross-compilation story. Its declaration
+# takes the capability's `timeout` (`transport::configured::timeout`).
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
 
 # Optional, and only for `tls`: the estate's TLS, hybrid key exchange and
@@ -25,23 +26,25 @@ tls = { package = "xmip-core-library-tls", git = "https://github.com/IlleNilsson
 # The URL a Location names (`net::Endpoint`) and HTTP/1.1 on the wire
 # (`net::http`): the one codec this transport and every technology riding
 # on it exchange a request for its answer with.
-net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main", optional = true }
 # Percent-encoding, written and read once for the estate: the HTTP event
 # binding's escaping among its users.
-codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main", optional = true }
 # The event capability's wire (ADR-0065 clause 3): the Wire this crate
 # implements, the Carried it posts and the Rules its HTTP binding answers
 # by — the two modes over them are written there, once, and the HTTP
-# binding's prefix, matching and escaping here. Not behind a feature, as
-# TLS is: every node links it already, through the runtime, so a feature
-# would only hide the wire from `cargo test`. A Technology may depend on
+# binding's prefix, matching and escaping here. Behind the default feature
+# with the rest of the code, never a feature of its own, as TLS is: every
+# node links it already, through the runtime, so a feature of its own would
+# only hide the wire from `cargo test`. A Technology may depend on
 # Foundation (repository-model.md section 4).
-event = { package = "xmip-core-event", git = "https://github.com/IlleNilsson/xmip-core-event", branch = "main" }
+event = { package = "xmip-core-event", git = "https://github.com/IlleNilsson/xmip-core-event", branch = "main", optional = true }
 # The names a request's method, target, query, headers and peer travel on
 # its arrival under, which the identity gates read (`context::property`,
 # ADR-0019 amendment 2026-09-24).
-context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
-# The Party a Wire carries to, by identifier.
+context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main", optional = true }
+# The Party a Wire carries to, by identifier, and the settings this
+# technology declares (xcore::settings).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 
 # The module's timing program (doc/governance/rust-style.md section 5c): a
@@ -90,17 +93,25 @@ resilience = { package = "xmip-core-resilience", git = "https://github.com/IlleN
 retry = { package = "xmip-core-resilience-retry", git = "https://github.com/IlleNilsson/xmip-core-resilience-retry", branch = "main" }
 
 [features]
-default = []
+# The technology: its code, everything it is built on, and its declaration.
+# Without it the crate is its declaration alone (ADR-0064, amendments
+# 2026-10-22 and 2026-11-26).
+default = ["declaration", "dep:net", "dep:codec", "dep:event", "dep:context"]
+# The declaration alone: what a Location of this technology is configured
+# with, `declaration::SETTINGS` and `SCHEMES`, and none of the code — what
+# the surfaces' library is to carry (open problem 48).
+declaration = []
 
 # HTTPS. Off by default because it is the only thing here that reaches outside
 # the standard library, and a forwarder on an edge device should not carry a TLS
-# stack it never opens.
-tls = ["dep:tls", "transport/tls"]
+# stack it never opens; the technology's code, so the default with it.
+tls = ["default", "dep:tls", "transport/tls"]
 
 # The far end this crate's tests and its timing program both stand up
 # (`fixture::keeping`), written once and never in a production build
-# (doc/governance/rust-style.md section 5c).
-test-support = []
+# (doc/governance/rust-style.md section 5c); the technology's code, so the
+# default with it.
+test-support = ["default"]
 
 [lints.rust]
 unsafe_code = "forbid"

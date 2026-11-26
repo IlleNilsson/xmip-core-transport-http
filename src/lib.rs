@@ -60,46 +60,64 @@
 //! the answers of a Service Bus namespace, came here on 2026-09-14 and left
 //! on the owner's ruling of 2026-09-22 for `xmip-core-transport-aws` and
 //! `xmip-core-transport-azure`, which ride on this crate.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod basic;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod endpoint;
+#[cfg(feature = "default")]
 pub mod event_wire;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+#[cfg(feature = "default")]
 pub mod inbound;
+#[cfg(feature = "default")]
 pub mod server;
+#[cfg(feature = "default")]
 pub mod status;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
-use transport::ArrivalIdentity;
-use transport::Arrived;
-use transport::Configured;
-use transport::Directions;
-use transport::Taken;
-use transport::Transport;
+#[cfg(feature = "default")]
 use transport::error::Result;
+#[cfg(feature = "default")]
 use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, Arrived, Configured, Directions, Taken, Transport};
 
+#[cfg(feature = "default")]
 use endpoint::{Connections, Offer};
+#[cfg(feature = "default")]
 use inbound::{Heard, Inbound};
+#[cfg(feature = "default")]
 use net::http::Request;
+#[cfg(feature = "default")]
 use net::{Endpoint, Schemes};
 
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
-
-/// The schemes an HTTP Location's address is entered with.
-pub const SCHEMES: &[&str] = &["http", "https"];
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
 /// The header a keyed send carries its deduplication key in
 /// (draft-ietf-httpapi-idempotency-key-header).
+#[cfg(feature = "default")]
 pub const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
 
 /// `key` as the header's value: a Structured Field string (RFC 8941
 /// section 3.3.3), quoted, with `"` and `\` escaped. The Journey id a send
 /// is keyed by is a UUID and needs neither.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn idempotency_key(key: &str) -> String {
     let mut value = String::with_capacity(key.len() + 2);
@@ -114,6 +132,7 @@ pub fn idempotency_key(key: &str) -> String {
     value
 }
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct HttpTransport {
     /// Where a Receive Location listens: the address it was entered with,
@@ -131,6 +150,7 @@ pub struct HttpTransport {
     secret: Option<transport::Secured>,
 }
 
+#[cfg(feature = "default")]
 impl HttpTransport {
     #[must_use]
     pub fn new(bind: impl Into<String>) -> Self {
@@ -180,6 +200,7 @@ impl HttpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for HttpTransport {
     fn name(&self) -> &'static str {
         "http"
@@ -243,6 +264,7 @@ impl Transport for HttpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl HttpTransport {
     /// The one send: `bytes` posted to `target`, under `key` where there
     /// is one.
@@ -277,30 +299,10 @@ impl HttpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for HttpTransport {
-    /// The address is where a Receive Location listens; a Send Location
-    /// posts to the URL its target names.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "h2c",
-                kind: Kind::Boolean,
-                presence: Presence::Optional,
-                meaning: "Whether HTTP/2 is spoken to an http:// endpoint by prior knowledge; \
-                          HTTP/1.1 in the clear when left out.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a connection is waited for, accepted or opened, and how \
-                 long one that stops sending is waited on; unbounded when left out.",
-            ),
-        ],
-    };
-
-    const SCHEMES: &'static [&'static str] = SCHEMES;
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The whole address: a Send Location's is the URL it posts to, and a
     /// Receive Location's scheme says whether it would listen in TLS.
@@ -352,6 +354,7 @@ impl Configured for HttpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl HttpTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on the accept, the connect and the reads.
@@ -361,6 +364,7 @@ impl HttpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for HttpTransport {
     /// The peer, and the request line: what every request says of its
     /// sender before any header does (`server::arrived`).
@@ -385,6 +389,7 @@ impl Loopback for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xcore::settings::Applies;
 
     #[test]
     fn http_declares_its_settings_and_reads_through_them() {

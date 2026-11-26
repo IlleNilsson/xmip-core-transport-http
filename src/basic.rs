@@ -17,7 +17,7 @@ pub fn basic(secret: Option<&Secured>, target: &str) -> Result<Option<String>> {
         return Ok(None);
     };
     let password = secret.as_kind(xcore::SecretKind::Password, "http")?;
-    let user = Target::under(crate::SCHEMES, target)
+    let user = Target::under(crate::declaration::SCHEMES, target)
         .and_then(|named| named.user())
         .unwrap_or_default();
     let pair = format!("{user}:{password}");
