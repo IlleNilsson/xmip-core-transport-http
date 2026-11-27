@@ -1,11 +1,11 @@
 [package]
 name = "xmip-core-transport-http"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository = "https://github.com/IlleNilsson/xmip-core-transport-http"
 description = "HTTP transport: one request body is one Stream, with a reply channel. HTTP/2 or HTTP/1.1 per connection, agreed by ALPN over TLS or known beforehand (h2c) where configured; a Receive Location serves either. HTTPS behind the tls feature. A xmip-core-transport technology."
-publish = false
+publish.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -110,13 +110,5 @@ tls = ["default", "dep:tls", "transport/tls"]
 # default with it.
 test-support = ["default"]
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-too_many_lines = "warn"
-pedantic = { level = "warn", priority = -1 }
-missing_errors_doc = "warn"
-missing_panics_doc = "warn"
-unwrap_used = "warn"
-expect_used = "allow"
+[lints]
+workspace = true
